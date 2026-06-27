@@ -1,0 +1,15 @@
+Module 1: WiFi Scanner
+
+Project Location:
+~/Projects/wifi_security_project
+
+Install Dependencies:
+python3 -m pip install --break-system-packages -r requirements.txt
+
+Compile:
+python3 -m py_compile scanner/wifi_scanner.py
+python3 -m py_compile scanner/network_parser.py
+python3 -m py_compile scanner/csv_logger.py
+
+Run Scanner:
+sudo python3 scanner/wifi_scanner.py --interface wlan0
