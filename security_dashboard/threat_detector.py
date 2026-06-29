@@ -83,7 +83,7 @@ def detect_threats(
         )
         summaries.append(
             NetworkThreatSummary(
-                ssid="Unknown_AP",
+                ssid="Unknown_Device",
                 bssid=bssid,
                 encryption="Unknown",
                 packet_count=stats["packet_count"],
