@@ -97,10 +97,11 @@ class SecurityDashboard:
                 )
 
     def _print_dashboard(self, summaries: list[NetworkThreatSummary]) -> None:
-        headers = ["SSID", "Encryption", "Packet Count", "Threat Detected", "Security Level"]
+        headers = ["SSID","Device Type", "Encryption", "Packet Count", "Threat Detected", "Security Level"]
         rows = [
             [
                 summary.ssid,
+                "Unknown Device" if summary.ssid == "Unknown_Device" else "Access Point",
                 summary.encryption,
                 str(summary.packet_count),
                 summary.threat_detected,
