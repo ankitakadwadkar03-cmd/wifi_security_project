@@ -10,8 +10,9 @@ import time
 from pathlib import Path
 from typing import Any
 
-from security_score import assign_security_score
-from threat_detector import NetworkThreatSummary, detect_threats
+from security_dashboard.security_score import assign_security_score
+from security_dashboard.threat_detector import NetworkThreatSummary, detect_threats
+from vendor_lookup.vendor_lookup import lookup_vendor
 
 
 DEFAULT_SCAN_CSV = Path("scan_results/wifi_scan_results.csv")
@@ -97,11 +98,12 @@ class SecurityDashboard:
                 )
 
     def _print_dashboard(self, summaries: list[NetworkThreatSummary]) -> None:
-        headers = ["SSID","Device Type", "Encryption", "Packet Count", "Threat Detected", "Security Level"]
+        headers = ["SSID","Device Type","Vendor", "Encryption", "Packet Count", "Threat Detected", "Security Level"]
         rows = [
             [
                 summary.ssid,
                 "Unknown Device" if summary.ssid == "Unknown_Device" else "Access Point",
+                lookup_vendor(summary.bssid),
                 summary.encryption,
                 str(summary.packet_count),
                 summary.threat_detected,

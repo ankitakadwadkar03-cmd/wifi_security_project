@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from threat_detector import NetworkThreatSummary
+from security_dashboard.threat_detector import NetworkThreatSummary
 
 
 def assign_security_score(summary: NetworkThreatSummary) -> str:
