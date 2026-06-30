@@ -35,7 +35,7 @@ def save_to_csv(
     output_path = Path(csv_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    merged_networks = _read_existing_networks(output_path)
+    merged_networks ={}
 
     for network in networks.values():
         bssid = str(network.get("BSSID") or "").strip().upper()

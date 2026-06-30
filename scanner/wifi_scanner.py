@@ -23,7 +23,8 @@ from network_parser import extract_network_details
 
 SCAN_INTERVAL_SECONDS = 5
 DEFAULT_CSV_PATH = Path("scan_results/wifi_scan_results.csv")
-
+CHANNELS_2GHZ = list(range(1, 14))
+CHANNEL_DWELL_SECONDS = 1.5
 
 def _run_command(command: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
@@ -33,7 +34,9 @@ def _run_command(command: list[str], check: bool = True) -> subprocess.Completed
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-
+def set_channel(interface: str, channel: int) -> None:
+    """Switch the wireless interface to a specific WiFi channel."""
+    _run_command(["iwconfig", interface, "channel", str(channel)], check=False)
 
 def _require_command(command_name: str) -> None:
     if shutil.which(command_name) is None:
@@ -92,7 +95,7 @@ def _verify_monitor_mode(interface: str) -> None:
 
 
 def scan_networks(interface: str, duration: int = SCAN_INTERVAL_SECONDS) -> dict[str, dict[str, str | int | None]]:
-    """Capture WiFi management frames for a short period and return discovered APs."""
+    """Scan WiFi channels one by one and return discovered access points."""
 
     networks: dict[str, dict[str, str | int | None]] = {}
 
@@ -102,16 +105,19 @@ def scan_networks(interface: str, duration: int = SCAN_INTERVAL_SECONDS) -> dict
             return
         networks[details.bssid] = details.as_dict()
 
-    sniffer = AsyncSniffer(iface=interface, prn=handle_packet, store=False)
+    for channel in CHANNELS_2GHZ:
+        set_channel(interface, channel)
 
-    try:
-        sniffer.start()
-        time.sleep(duration)
-    finally:
+        sniffer = AsyncSniffer(iface=interface, prn=handle_packet, store=False)
+
         try:
-            sniffer.stop()
-        except Exception:
-            pass
+            sniffer.start()
+            time.sleep(CHANNEL_DWELL_SECONDS)
+        finally:
+            try:
+                sniffer.stop()
+            except Exception:
+                pass
 
     return networks
 
