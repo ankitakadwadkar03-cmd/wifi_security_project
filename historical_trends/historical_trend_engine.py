@@ -1,0 +1,645 @@
+"""Historical trend and comparison engine.
+
+Module 8 for WiFi Real-Time Security and Signal Analyzer.
+
+Reads:
+    security_reports/final_security_report.csv
+
+Writes:
+    security_reports/history.db
+    security_reports/historical_trend_report.txt
+    security_reports/historical_trend_report.json
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import sqlite3
+from collections import Counter
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+
+DEFAULT_REPORT_CSV = Path("security_reports/final_security_report.csv")
+DEFAULT_DATABASE = Path("security_reports/history.db")
+DEFAULT_TEXT_REPORT = Path("security_reports/historical_trend_report.txt")
+DEFAULT_JSON_REPORT = Path("security_reports/historical_trend_report.json")
+
+REQUIRED_COLUMNS = [
+    "SSID",
+    "BSSID",
+    "Encryption",
+    "Total_Packets",
+    "Suspicious_Score",
+    "Risk_Level",
+    "Attack_Type",
+]
+
+
+def initialize_database(database_path: str | Path = DEFAULT_DATABASE) -> sqlite3.Connection:
+    """Create the SQLite database and required tables if they do not exist."""
+
+    path = Path(database_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(path)
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS scan_history (
+            scan_id INTEGER,
+            scan_timestamp TEXT NOT NULL,
+            ssid TEXT,
+            bssid TEXT,
+            encryption TEXT,
+            packet_count INTEGER,
+            security_score INTEGER,
+            risk_level TEXT,
+            attack_type TEXT
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS scan_summary (
+            scan_timestamp TEXT NOT NULL,
+            total_networks INTEGER,
+            safe_count INTEGER,
+            low_risk_count INTEGER,
+            warning_count INTEGER,
+            danger_count INTEGER,
+            rogue_count INTEGER,
+            evil_twin_count INTEGER,
+            average_security_score REAL
+        )
+        """
+    )
+    connection.commit()
+    return connection
+
+
+def load_current_report(report_csv: str | Path = DEFAULT_REPORT_CSV) -> list[dict[str, str]]:
+    """Load current security report rows safely."""
+
+    path = Path(report_csv)
+    if not path.exists():
+        print(f"[WARNING] Security report not found: {path}")
+        return []
+
+    if path.stat().st_size == 0:
+        print(f"[WARNING] Security report is empty: {path}")
+        return []
+
+    try:
+        with path.open("r", newline="", encoding="utf-8") as csv_file:
+            reader = csv.DictReader(csv_file)
+            if reader.fieldnames is None:
+                print(f"[WARNING] Security report has no headers: {path}")
+                return []
+            return [_normalize_report_row(row) for row in reader]
+    except Exception as exc:
+        print(f"[WARNING] Could not read security report {path}: {exc}")
+        return []
+
+
+def store_scan(connection: sqlite3.Connection, current_rows: list[dict[str, str]]) -> dict[str, Any]:
+    """Append a new scan snapshot and summary into SQLite history."""
+
+    scan_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    scan_id = _next_scan_id(connection)
+    summary = _calculate_scan_summary(current_rows)
+    cursor = connection.cursor()
+
+    for row in current_rows:
+        cursor.execute(
+            """
+            INSERT INTO scan_history (
+                scan_id, scan_timestamp, ssid, bssid, encryption, packet_count,
+                security_score, risk_level, attack_type
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                scan_id,
+                scan_timestamp,
+                row["SSID"],
+                row["BSSID"],
+                row["Encryption"],
+                _to_int(row["Total_Packets"]),
+                _to_int(row["Suspicious_Score"], default=100),
+                row["Risk_Level"],
+                row["Attack_Type"],
+            ),
+        )
+
+    cursor.execute(
+        """
+        INSERT INTO scan_summary (
+            scan_timestamp, total_networks, safe_count, low_risk_count,
+            warning_count, danger_count, rogue_count, evil_twin_count,
+            average_security_score
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            scan_timestamp,
+            summary["total_networks"],
+            summary["safe_count"],
+            summary["low_risk_count"],
+            summary["warning_count"],
+            summary["danger_count"],
+            summary["rogue_count"],
+            summary["evil_twin_count"],
+            summary["average_security_score"],
+        ),
+    )
+
+    connection.commit()
+    return {
+        "scan_id": scan_id,
+        "scan_timestamp": scan_timestamp,
+        "summary": summary,
+    }
+
+
+def compare_history(
+    connection: sqlite3.Connection,
+    current_scan: dict[str, Any],
+) -> dict[str, Any]:
+    """Compare the current scan with the previous scan in history."""
+
+    current_scan_id = current_scan["scan_id"]
+    previous_scan_id = _previous_scan_id(connection, current_scan_id)
+    current_rows = _load_scan_rows(connection, current_scan_id)
+    previous_rows = _load_scan_rows(connection, previous_scan_id) if previous_scan_id else []
+    current_summary = current_scan["summary"]
+    previous_summary = _load_summary_by_scan_id(connection, previous_scan_id) if previous_scan_id else None
+
+    current_bssids = {row["bssid"] for row in current_rows}
+    previous_bssids = {row["bssid"] for row in previous_rows}
+    previous_scores = {row["bssid"]: row["security_score"] for row in previous_rows}
+
+    network_trends = []
+    for row in current_rows:
+        bssid = row["bssid"]
+        if bssid not in previous_scores:
+            trend = "NEW NETWORK"
+        elif row["security_score"] > previous_scores[bssid]:
+            trend = "IMPROVING"
+        elif row["security_score"] < previous_scores[bssid]:
+            trend = "DECLINING"
+        else:
+            trend = "STABLE"
+        network_trends.append(
+            {
+                "ssid": row["ssid"],
+                "bssid": bssid,
+                "previous_score": previous_scores.get(bssid),
+                "current_score": row["security_score"],
+                "trend": trend,
+            }
+        )
+
+    if previous_summary is None:
+        comparison = {
+            "has_previous_scan": False,
+            "message": "Historical comparison will begin from the next scan.",
+            "previous_scan_id": None,
+            "current_scan_id": current_scan_id,
+            "total_networks_difference": 0,
+            "average_score_difference": 0,
+            "rogue_count_difference": 0,
+            "evil_twin_count_difference": 0,
+            "warning_danger_difference": 0,
+            "new_networks": sorted(current_bssids),
+            "disappeared_networks": [],
+            "network_trends": network_trends,
+            "overall_trend": "STABLE",
+        }
+        return comparison
+
+    current_warning_danger = current_summary["warning_count"] + current_summary["danger_count"]
+    previous_warning_danger = previous_summary["warning_count"] + previous_summary["danger_count"]
+    score_difference = round(
+        current_summary["average_security_score"] - previous_summary["average_security_score"],
+        2,
+    )
+
+    return {
+        "has_previous_scan": True,
+        "message": "",
+        "previous_scan_id": previous_scan_id,
+        "current_scan_id": current_scan_id,
+        "total_networks_difference": current_summary["total_networks"] - previous_summary["total_networks"],
+        "average_score_difference": score_difference,
+        "rogue_count_difference": current_summary["rogue_count"] - previous_summary["rogue_count"],
+        "evil_twin_count_difference": current_summary["evil_twin_count"] - previous_summary["evil_twin_count"],
+        "warning_danger_difference": current_warning_danger - previous_warning_danger,
+        "new_networks": sorted(current_bssids - previous_bssids),
+        "disappeared_networks": sorted(previous_bssids - current_bssids),
+        "network_trends": network_trends,
+        "overall_trend": _classify_overall_trend(score_difference),
+    }
+
+
+def generate_statistics(connection: sqlite3.Connection) -> dict[str, Any]:
+    """Generate historical statistics over all stored scans."""
+
+    cursor = connection.cursor()
+    rows = cursor.execute(
+        """
+        SELECT scan_timestamp, ssid, bssid, security_score, attack_type
+        FROM scan_history
+        """
+    ).fetchall()
+    summaries = cursor.execute(
+        """
+        SELECT average_security_score
+        FROM scan_summary
+        """
+    ).fetchall()
+
+    if not rows:
+        return {
+            "most_frequently_detected_network": None,
+            "most_frequent_rogue_ap": None,
+            "most_frequent_evil_twin": None,
+            "highest_security_score_ever": None,
+            "lowest_security_score_ever": None,
+            "average_security_score": 0,
+            "network_history": [],
+        }
+
+    bssid_counts = Counter(row[2] for row in rows)
+    rogue_counts = Counter(row[2] for row in rows if row[4] == "ROGUE_AP")
+    evil_twin_counts = Counter(row[2] for row in rows if row[4] == "EVIL_TWIN")
+    scores = [int(row[3]) for row in rows]
+    summary_scores = [float(row[0]) for row in summaries] if summaries else scores
+
+    return {
+        "most_frequently_detected_network": _counter_top(bssid_counts),
+        "most_frequent_rogue_ap": _counter_top(rogue_counts),
+        "most_frequent_evil_twin": _counter_top(evil_twin_counts),
+        "highest_security_score_ever": max(scores),
+        "lowest_security_score_ever": min(scores),
+        "average_security_score": round(sum(summary_scores) / len(summary_scores), 2) if summary_scores else 0,
+        "network_history": _build_network_history(rows),
+    }
+
+
+def generate_summary(
+    current_scan: dict[str, Any],
+    comparison: dict[str, Any],
+    statistics: dict[str, Any],
+) -> dict[str, Any]:
+    """Build the complete trend report payload."""
+
+    summary = current_scan["summary"]
+    repeated_rogues = [
+        item for item in statistics["network_history"] if item["most_common_attack_type"] == "ROGUE_AP" and item["appearances"] > 1
+    ]
+    repeated_evil_twins = [
+        item for item in statistics["network_history"] if item["most_common_attack_type"] == "EVIL_TWIN" and item["appearances"] > 1
+    ]
+
+    return {
+        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "current_scan": current_scan,
+        "comparison": comparison,
+        "statistics": statistics,
+        "executive_summary": {
+            "current_scan_number": current_scan["scan_id"],
+            "previous_scan_number": comparison["previous_scan_id"],
+            "average_security_score": summary["average_security_score"],
+            "trend": comparison["overall_trend"],
+            "repeated_rogue_aps": len(repeated_rogues),
+            "repeated_evil_twin_detections": len(repeated_evil_twins),
+            "new_networks": len(comparison["new_networks"]),
+            "networks_disappeared": len(comparison["disappeared_networks"]),
+        },
+    }
+
+
+def save_text_report(report: dict[str, Any], output_path: str | Path = DEFAULT_TEXT_REPORT) -> None:
+    """Save the historical trend report as text."""
+
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_build_text_report(report), encoding="utf-8")
+
+
+def save_json_report(report: dict[str, Any], output_path: str | Path = DEFAULT_JSON_REPORT) -> None:
+    """Save the historical trend report as JSON."""
+
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(report, indent=4), encoding="utf-8")
+
+
+def print_summary(report: dict[str, Any]) -> None:
+    """Print a professional trend comparison report."""
+
+    print(_build_text_report(report))
+
+
+def run_historical_trend_engine(
+    report_csv: str | Path = DEFAULT_REPORT_CSV,
+    database_path: str | Path = DEFAULT_DATABASE,
+    text_output: str | Path = DEFAULT_TEXT_REPORT,
+    json_output: str | Path = DEFAULT_JSON_REPORT,
+) -> dict[str, Any]:
+    connection = initialize_database(database_path)
+    try:
+        current_rows = load_current_report(report_csv)
+        if not current_rows:
+            print("[WARNING] No valid security report found. History database was not updated.")
+            return {}
+
+        current_scan = store_scan(connection, current_rows)
+        comparison = compare_history(connection, current_scan)
+        statistics = generate_statistics(connection)
+        report = generate_summary(current_scan, comparison, statistics)
+        save_text_report(report, text_output)
+        save_json_report(report, json_output)
+        print_summary(report)
+        print(f"\n[OK] History database updated: {Path(database_path)}")
+        print(f"[OK] Text report saved to: {Path(text_output)}")
+        print(f"[OK] JSON report saved to: {Path(json_output)}")
+        return report
+    finally:
+        connection.close()
+
+
+def _calculate_scan_summary(rows: list[dict[str, str]]) -> dict[str, Any]:
+    scores = [_to_int(row["Suspicious_Score"], default=100) for row in rows]
+    return {
+        "total_networks": len(rows),
+        "safe_count": sum(1 for row in rows if row["Risk_Level"] == "SAFE"),
+        "low_risk_count": sum(1 for row in rows if row["Risk_Level"] == "LOW RISK"),
+        "warning_count": sum(1 for row in rows if row["Risk_Level"] == "WARNING"),
+        "danger_count": sum(1 for row in rows if row["Risk_Level"] == "DANGER"),
+        "rogue_count": sum(1 for row in rows if row["Attack_Type"] == "ROGUE_AP"),
+        "evil_twin_count": sum(1 for row in rows if row["Attack_Type"] == "EVIL_TWIN"),
+        "average_security_score": round(sum(scores) / len(scores), 2) if scores else 0,
+    }
+
+
+def _next_scan_id(connection: sqlite3.Connection) -> int:
+    row = connection.execute("SELECT COALESCE(MAX(scan_id), 0) + 1 FROM scan_history").fetchone()
+    return int(row[0])
+
+
+def _previous_scan_id(connection: sqlite3.Connection, current_scan_id: int) -> int | None:
+    row = connection.execute(
+        "SELECT MAX(scan_id) FROM scan_history WHERE scan_id < ?",
+        (current_scan_id,),
+    ).fetchone()
+    return int(row[0]) if row and row[0] is not None else None
+
+
+def _load_scan_rows(connection: sqlite3.Connection, scan_id: int | None) -> list[dict[str, Any]]:
+    if scan_id is None:
+        return []
+
+    rows = connection.execute(
+        """
+        SELECT scan_id, scan_timestamp, ssid, bssid, encryption, packet_count,
+               security_score, risk_level, attack_type
+        FROM scan_history
+        WHERE scan_id = ?
+        """,
+        (scan_id,),
+    ).fetchall()
+
+    return [
+        {
+            "scan_id": row[0],
+            "scan_timestamp": row[1],
+            "ssid": row[2],
+            "bssid": row[3],
+            "encryption": row[4],
+            "packet_count": row[5],
+            "security_score": row[6],
+            "risk_level": row[7],
+            "attack_type": row[8],
+        }
+        for row in rows
+    ]
+
+
+def _load_summary_by_scan_id(connection: sqlite3.Connection, scan_id: int | None) -> dict[str, Any] | None:
+    if scan_id is None:
+        return None
+
+    timestamp_row = connection.execute(
+        "SELECT scan_timestamp FROM scan_history WHERE scan_id = ? LIMIT 1",
+        (scan_id,),
+    ).fetchone()
+    if timestamp_row is None:
+        return None
+
+    row = connection.execute(
+        """
+        SELECT total_networks, safe_count, low_risk_count, warning_count,
+               danger_count, rogue_count, evil_twin_count, average_security_score
+        FROM scan_summary
+        WHERE scan_timestamp = ?
+        """,
+        (timestamp_row[0],),
+    ).fetchone()
+    if row is None:
+        return None
+
+    return {
+        "total_networks": int(row[0]),
+        "safe_count": int(row[1]),
+        "low_risk_count": int(row[2]),
+        "warning_count": int(row[3]),
+        "danger_count": int(row[4]),
+        "rogue_count": int(row[5]),
+        "evil_twin_count": int(row[6]),
+        "average_security_score": float(row[7]),
+    }
+
+
+def _build_network_history(rows: list[tuple[Any, ...]]) -> list[dict[str, Any]]:
+    grouped: dict[str, list[tuple[Any, ...]]] = {}
+    for row in rows:
+        grouped.setdefault(row[2], []).append(row)
+
+    history = []
+    for bssid, items in grouped.items():
+        timestamps = [item[0] for item in items]
+        scores = [int(item[3]) for item in items]
+        attacks = Counter(item[4] for item in items)
+        ssid = Counter(item[1] for item in items).most_common(1)[0][0]
+        history.append(
+            {
+                "ssid": ssid,
+                "bssid": bssid,
+                "first_seen": min(timestamps),
+                "last_seen": max(timestamps),
+                "appearances": len(items),
+                "highest_security_score": max(scores),
+                "lowest_security_score": min(scores),
+                "most_common_attack_type": attacks.most_common(1)[0][0],
+            }
+        )
+
+    return sorted(history, key=lambda item: (-item["appearances"], item["bssid"]))
+
+
+def _build_text_report(report: dict[str, Any]) -> str:
+    executive = report["executive_summary"]
+    comparison = report["comparison"]
+    current_summary = report["current_scan"]["summary"]
+    statistics = report["statistics"]
+
+    lines = [
+        "=====================================",
+        "Historical Trend Summary",
+        "=====================================",
+        f"Generated At              : {report['generated_at']}",
+        f"Current Scan Number       : {executive['current_scan_number']}",
+        f"Previous Scan Number      : {executive['previous_scan_number']}",
+        f"Current Average Score     : {current_summary['average_security_score']}",
+        f"Trend                     : {executive['trend']}",
+        "",
+    ]
+
+    if not comparison["has_previous_scan"]:
+        lines.append(comparison["message"])
+        lines.append("")
+
+    lines.extend(
+        [
+            f"Total Network Difference  : {comparison['total_networks_difference']}",
+            f"Average Score Difference  : {comparison['average_score_difference']}",
+            f"Rogue AP Difference       : {comparison['rogue_count_difference']}",
+            f"Evil Twin Difference      : {comparison['evil_twin_count_difference']}",
+            f"Warning/Danger Difference : {comparison['warning_danger_difference']}",
+            f"New Networks              : {len(comparison['new_networks'])}",
+            f"Disappeared Networks      : {len(comparison['disappeared_networks'])}",
+            f"Repeated Rogue AP         : {executive['repeated_rogue_aps']}",
+            f"Repeated Evil Twin        : {executive['repeated_evil_twin_detections']}",
+            "",
+            "Historical Statistics:",
+            f"Most Frequently Detected  : {_format_counter_result(statistics['most_frequently_detected_network'])}",
+            f"Most Frequent Rogue AP    : {_format_counter_result(statistics['most_frequent_rogue_ap'])}",
+            f"Most Frequent Evil Twin   : {_format_counter_result(statistics['most_frequent_evil_twin'])}",
+            f"Highest Score Ever        : {statistics['highest_security_score_ever']}",
+            f"Lowest Score Ever         : {statistics['lowest_security_score_ever']}",
+            f"Historical Average Score  : {statistics['average_security_score']}",
+            "",
+            "Network Trends:",
+        ]
+    )
+
+    if not comparison["network_trends"]:
+        lines.append("No networks were available in the current scan.")
+    else:
+        for item in comparison["network_trends"]:
+            lines.append(
+                f"- {item['ssid']} ({item['bssid']}): {item['trend']} "
+                f"[previous={item['previous_score']}, current={item['current_score']}]"
+            )
+
+    lines.append("=====================================")
+    return "\n".join(lines)
+
+
+def _normalize_report_row(row: dict[str, str]) -> dict[str, str]:
+    normalized = {}
+    for column in REQUIRED_COLUMNS:
+        normalized[column] = _clean_text(row.get(column), _default_for_column(column))
+    normalized["Risk_Level"] = _normalize_risk_level(normalized["Risk_Level"])
+    normalized["Attack_Type"] = _normalize_attack_type(normalized["Attack_Type"])
+    return normalized
+
+
+def _default_for_column(column: str) -> str:
+    return {
+        "SSID": "Unknown_Device",
+        "BSSID": "Unknown",
+        "Encryption": "Unknown",
+        "Total_Packets": "0",
+        "Suspicious_Score": "100",
+        "Risk_Level": "SAFE",
+        "Attack_Type": "NORMAL",
+    }.get(column, "Unknown")
+
+
+def _classify_overall_trend(score_difference: float) -> str:
+    if score_difference > 0:
+        return "IMPROVING"
+    if score_difference < 0:
+        return "DECLINING"
+    return "STABLE"
+
+
+def _counter_top(counter: Counter[str]) -> dict[str, Any] | None:
+    if not counter:
+        return None
+    key, count = counter.most_common(1)[0]
+    return {"bssid": key, "count": count}
+
+
+def _format_counter_result(value: dict[str, Any] | None) -> str:
+    if not value:
+        return "None"
+    return f"{value['bssid']} ({value['count']} times)"
+
+
+def _normalize_risk_level(value: str | None) -> str:
+    cleaned = " ".join(_clean_text(value, "SAFE").upper().replace("-", " ").split())
+    if cleaned in {"SAFE", "LOW RISK", "WARNING", "DANGER"}:
+        return cleaned
+    return "SAFE"
+
+
+def _normalize_attack_type(value: str | None) -> str:
+    cleaned = _clean_text(value, "NORMAL").upper().replace("-", "_").replace(" ", "_")
+    if cleaned in {"NORMAL", "SUSPICIOUS", "ROGUE_AP", "EVIL_TWIN"}:
+        return cleaned
+    return "NORMAL"
+
+
+def _to_int(value: object, default: int = 0) -> int:
+    try:
+        return int(float(str(value).strip()))
+    except (TypeError, ValueError):
+        return default
+
+
+def _clean_text(value: object, default: str) -> str:
+    cleaned = str(value).strip()
+    if not cleaned or cleaned.lower() in {"nan", "none", "null"}:
+        return default
+    return cleaned
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Store and compare WiFi security history.")
+    parser.add_argument("--report-csv", default=str(DEFAULT_REPORT_CSV), help="Final security report CSV path.")
+    parser.add_argument("--database", default=str(DEFAULT_DATABASE), help="SQLite history database path.")
+    parser.add_argument("--text-output", default=str(DEFAULT_TEXT_REPORT), help="Text trend report output path.")
+    parser.add_argument("--json-output", default=str(DEFAULT_JSON_REPORT), help="JSON trend report output path.")
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = _parse_args()
+    run_historical_trend_engine(
+        report_csv=args.report_csv,
+        database_path=args.database,
+        text_output=args.text_output,
+        json_output=args.json_output,
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
