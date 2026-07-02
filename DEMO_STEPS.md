@@ -69,8 +69,13 @@ The dashboard displays:
 * Threat Detected
 * Security Level
 
-## 7. Stop monitor mode after demo
 
+## 7. Run Module 4 - Final Security Report Generator
+
+```bash
+python3 report_generator/security_report_generator.py
+
+## 8. Stop monitor mode after demo
 ```bash
 sudo airmon-ng stop wlan0mon
 sudo service NetworkManager restart
