@@ -272,3 +272,101 @@ This project works in four stages. First, it scans nearby WiFi networks using mo
 * Some networks may show packet count 0 if they were detected by scanning but no live data packets were captured from them.
 * Vendor lookup is based on MAC address OUI prefix and may identify the manufacturer, not the exact device model.
 * WPA3 detection is best effort because some routers use mixed WPA2/WPA3 transition modes.
+
+
+
+## Final Additional Modules
+
+### Module 5: Rogue AP and Evil Twin Detection
+
+Main file:
+
+```bash
+evil_twin_detection/evil_twin_detector.py
+```
+
+Detects possible rogue access points and Evil Twin indicators. It updates the final security report with `Attack_Type`.
+
+### Module 6: Real-Time Security Monitor
+
+Main file:
+
+```bash
+real_time_monitor/real_time_monitor.py
+```
+
+Runs the main real-time pipeline:
+
+```text
+Module 1 → Module 2 → Module 4 → Module 5 → Module 6
+```
+
+### Module 7: Security Advisor
+
+Main file:
+
+```bash
+security_advisor/security_advisor.py
+```
+
+Generates security explanations and recommendations.
+
+Output files:
+
+```text
+security_reports/security_advisor_report.txt
+security_reports/security_advisor_report.json
+```
+
+### Module 8: Historical Trend Engine
+
+Main file:
+
+```bash
+historical_trends/historical_trend_engine.py
+```
+
+Stores scan history in SQLite and compares current scan results with previous scans.
+
+Output files:
+
+```text
+security_reports/history.db
+security_reports/historical_trend_report.txt
+security_reports/historical_trend_report.json
+```
+
+### Module 9: Alert Notification System
+
+Main file:
+
+```bash
+alert_notification/alert_notification_system.py
+```
+
+Generates alert notifications with severity levels.
+
+Output files:
+
+```text
+security_reports/alert_notifications.log
+security_reports/alert_notifications.json
+```
+
+## Final Project Pipeline
+
+```text
+WiFi Scan
+→ Packet Capture
+→ Security Dashboard
+→ Final Report
+→ Rogue AP / Evil Twin Detection
+→ Real-Time Monitor
+→ Security Advisor
+→ Historical Trend Analysis
+→ Alert Notification System
+```
+
+## Important Demo Note
+
+Some alerts are marked as possible rogue AP or possible Evil Twin based on suspicious indicators such as unknown BSSIDs, duplicate SSIDs, packet differences, and risk scores. These alerts are investigation indicators, not final proof of an attack.
