@@ -1,0 +1,4 @@
+SSID,BSSID,Threat_Type,Decision,Analyst,Analyst_Note
+Airtel_ashw_2959,F4:4D:5C:F6:F7:8C,POSSIBLE_EVIL_TWIN_INDICATOR,UNDER_INVESTIGATION,Admin,Same SSID detected with different BSSID. Verify physical router MAC before confirming attack.
+OPPO A16,C2:FF:A7:C5:36:4E,NORMAL,TRUSTED,Admin,Known trusted hotspot used for testing.
+Airtel_ashw_2959,14:A7:2B:D0:EF:16,NORMAL,TRUSTED,Admin,Known trusted router from baseline.
