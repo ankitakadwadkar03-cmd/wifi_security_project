@@ -1,11 +1,38 @@
 import json
+import os
+import smtplib
 from pathlib import Path
 from datetime import datetime
+from email.message import EmailMessage
 
 
 INPUT_FILE = Path("security_reports/pre_connect_safety_report.json")
 OUTPUT_TXT = Path("security_reports/email_alert_preview.txt")
 OUTPUT_JSON = Path("security_reports/email_alert_preview.json")
+ENV_FILE = Path(".env")
+
+
+def load_env_file():
+    config = {}
+
+    if not ENV_FILE.exists():
+        return config
+
+    with ENV_FILE.open("r", encoding="utf-8") as file:
+        for line in file:
+            line = line.strip()
+
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+
+            key, value = line.split("=", 1)
+            config[key.strip()] = value.strip()
+
+    return config
+
+
+def get_config_value(config, key, default=""):
+    return os.getenv(key, config.get(key, default))
 
 
 def load_safety_report():
@@ -72,7 +99,7 @@ def build_alert_message(alert_networks):
     return "\n".join(lines)
 
 
-def save_alert_json(alert_networks, message):
+def save_alert_json(alert_networks, message, email_status):
     data = {
         "module": "Email Alert System",
         "generated_at": datetime.now().isoformat(timespec="seconds"),
@@ -83,6 +110,7 @@ def save_alert_json(alert_networks, message):
         if alert_networks
         else "NetShield Security Alert - No High Risk WiFi Detected",
         "email_body": message,
+        "email_status": email_status,
     }
 
     with OUTPUT_JSON.open("w", encoding="utf-8") as file:
@@ -94,20 +122,79 @@ def save_alert_text(message):
         file.write(message)
 
 
+def send_email_alert(config, subject, body):
+    email_enabled = get_config_value(config, "NETSHIELD_EMAIL_ENABLED", "false").lower()
+
+    if email_enabled != "true":
+        return "DISABLED"
+
+    smtp_server = get_config_value(config, "NETSHIELD_SMTP_SERVER")
+    smtp_port = int(get_config_value(config, "NETSHIELD_SMTP_PORT", "587"))
+    sender = get_config_value(config, "NETSHIELD_EMAIL_SENDER")
+    password = get_config_value(config, "NETSHIELD_EMAIL_PASSWORD")
+    receiver = get_config_value(config, "NETSHIELD_EMAIL_RECEIVER")
+
+    missing_values = []
+
+    if not smtp_server:
+        missing_values.append("NETSHIELD_SMTP_SERVER")
+    if not sender:
+        missing_values.append("NETSHIELD_EMAIL_SENDER")
+    if not password:
+        missing_values.append("NETSHIELD_EMAIL_PASSWORD")
+    if not receiver:
+        missing_values.append("NETSHIELD_EMAIL_RECEIVER")
+
+    if missing_values:
+        return f"FAILED - Missing values: {', '.join(missing_values)}"
+
+    message = EmailMessage()
+    message["Subject"] = subject
+    message["From"] = sender
+    message["To"] = receiver
+    message.set_content(body)
+
+    try:
+        with smtplib.SMTP(smtp_server, smtp_port, timeout=20) as server:
+            server.starttls()
+            server.login(sender, password)
+            server.send_message(message)
+
+        return "SENT"
+
+    except Exception as error:
+        return f"FAILED - {error}"
+
+
 def main():
+    config = load_env_file()
+
     report = load_safety_report()
     networks = report.get("networks", [])
 
     alert_networks = [network for network in networks if is_alert_required(network)]
     message = build_alert_message(alert_networks)
 
-    save_alert_text(message)
-    save_alert_json(alert_networks, message)
+    subject = (
+        "NetShield Security Alert - High Risk WiFi Detected"
+        if alert_networks
+        else "NetShield Security Alert - No High Risk WiFi Detected"
+    )
 
-    print("\nEmail Alert Preview Generated")
-    print("-----------------------------")
+    save_alert_text(message)
+
+    email_status = "NOT_REQUIRED"
+
+    if alert_networks:
+        email_status = send_email_alert(config, subject, message)
+
+    save_alert_json(alert_networks, message, email_status)
+
+    print("\nEmail Alert System Completed")
+    print("----------------------------")
     print(f"Alert Required : {'YES' if alert_networks else 'NO'}")
     print(f"Total Alerts   : {len(alert_networks)}")
+    print(f"Email Status   : {email_status}")
     print(f"[OK] Text saved to : {OUTPUT_TXT}")
     print(f"[OK] JSON saved to : {OUTPUT_JSON}")
 
