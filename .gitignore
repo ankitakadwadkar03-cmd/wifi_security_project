@@ -3,3 +3,5 @@ __pycache__/
 scan_results/
 packet_logs/
 security_reports/
+.env
+*.env
