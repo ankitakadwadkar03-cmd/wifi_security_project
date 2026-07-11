@@ -104,3 +104,10 @@ This project scans nearby WiFi networks, captures live wireless packets, analyze
 ## Important Note for Explanation
 
 Possible rogue AP and Evil Twin alerts are investigation indicators. They are based on unknown BSSIDs, duplicate SSIDs, packet behavior, and risk scores. They are not final proof of an attack.
+## Unified NetShield Backend Pipeline
+
+The complete backend workflow can be executed using one command:
+
+```bash
+python3 netshield_pipeline.py --send-email
+
