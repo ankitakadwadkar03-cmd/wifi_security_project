@@ -5,3 +5,8 @@ packet_logs/
 security_reports/
 .env
 *.env
+# Frontend ignored files
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+frontend/*.env
