@@ -1,9 +1,10 @@
-import HeroVisual from "../components/HeroVisual";
 import { featureCards, threatCards } from "../data/demoData";
 import StatusBadge from "../components/StatusBadge";
 
 import wifiScanningImage from "../assets/wifi scanning photo.jpg";
 import packetAnalysisImage from "../assets/live packet analysis photo.jpg";
+import threatDetectionImage from "../assets/Threat photo.jpg";
+import securityAdvisorImage from "../assets/security photo.jpg";
 
 import { FaShieldAlt, FaLock } from "react-icons/fa";
 import { MdWifi } from "react-icons/md";
@@ -19,15 +20,9 @@ export default function HomePage({ setCurrentPage }) {
           </span>
 
           <div className="referenceBrand">
-            <div className="referenceShield">
-              <span></span>
-            </div>
-
-            <h1>
-              Net<span>Shield</span>
-            </h1>
+           <h1>Net<span>Shield</span>
+           </h1>
           </div>
-
           <h2>
             Wireless Threat Detection
             <br />
@@ -94,18 +89,17 @@ export default function HomePage({ setCurrentPage }) {
           </div>
         </div>
 
-        <HeroVisual />
       </section>
 
       <section className="featureIntro">
         <span>Core Capabilities</span>
 
-        <h2>Built like a real wireless security product</h2>
+        <h2>Complete Wireless Security, All in One Place</h2>
 
         <p>
-          NetShield combines scanner output, packet visibility, threat
-          detection, reports, alerts, and recommendations in one clean web
-          interface.
+          NetShield brings wireless scanning, packet visibility, threat detection,
+          security alerts, reports, and actionable recommendations together in one
+          unified platform.
         </p>
       </section>
 
@@ -142,25 +136,25 @@ export default function HomePage({ setCurrentPage }) {
                   alt="Live packet analysis"
                   className="capabilityImage"
                 />
-              ) : (
-                <div className="visualInner">
-                  <h4>{feature.title}</h4>
-
-                  <p>{feature.tag}</p>
-
-                  <div className="visualLines">
-                    <span></span>
-                    <span></span>
-                    <span></span>
-                  </div>
-                </div>
-              )}
+              ) : feature.visual === "threat" ? (
+                <img
+                  src={threatDetectionImage}
+                  alt="Wireless threat detection"
+                  className="threatCapabilityImage"
+                />
+              ) : feature.visual === "advisor" ? (
+                <img
+                  src={securityAdvisorImage}
+                  alt="Security advisor"
+                  className="advisorCapabilityImage"
+                />
+              ) : null}
             </div>
           </div>
         ))}
       </section>
 
-      <section className="splitShowcase">
+      <section className="splitShowcase threatCoverageSection">
         <div>
           <span>Threat Coverage</span>
 

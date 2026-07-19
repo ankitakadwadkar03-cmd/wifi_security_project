@@ -3,7 +3,7 @@ import { networkRows } from "../data/demoData";
 
 export default function DashboardPage({ setCurrentPage }) {
   return (
-    <section className="appPage">
+    <section className="appPage dashboardPage">
       <div className="pageHeader">
         <span>Monitoring Console</span>
         <h1>Dashboard</h1>

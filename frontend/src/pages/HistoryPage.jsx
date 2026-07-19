@@ -2,7 +2,7 @@ import { historyItems } from "../data/demoData";
 
 export default function HistoryPage() {
   return (
-    <section className="appPage">
+    <section className="appPage historyPage">
       <div className="pageHeader">
         <span>Historical Analysis</span>
         <h1>History</h1>

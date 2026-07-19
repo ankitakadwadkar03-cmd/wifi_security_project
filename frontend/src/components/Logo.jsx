@@ -9,10 +9,11 @@ export default function Logo({ onClick }) {
       </div>
 
       <div className="logoText">
-        <span className="net">Net</span>
-        <span className="shield">Shield</span>
+       <div className="logoName">
+         <span className="net">Net</span><span className="shield">Shield</span>
+       </div>
 
-        <small>WiFi Security Analyzer</small>
+       <small>WiFi Security Analyzer</small>
       </div>
     </button>
   );

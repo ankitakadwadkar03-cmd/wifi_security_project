@@ -3,7 +3,7 @@ import StatusBadge from "../components/StatusBadge";
 
 export default function ThreatCenterPage() {
   return (
-    <section className="appPage">
+    <section className="appPage threatCenterPage">
 
       <div className="pageHeader">
         <span>Security Monitoring</span>
