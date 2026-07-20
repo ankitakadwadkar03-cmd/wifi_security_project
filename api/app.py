@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import csv
+import json
+from datetime import datetime, timezone
 from pathlib import Path
 
-from flask import Flask, jsonify
+from flask import Flask, Response, jsonify, send_from_directory
 from flask_cors import CORS
 
 app = Flask(__name__)
@@ -24,6 +26,8 @@ CORS(
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 NETWORK_CSV = PROJECT_ROOT / "scan_results" / "wifi_scan_results.csv"
 SECURITY_REPORT_CSV = PROJECT_ROOT / "security_reports" / "final_security_report.csv"
+REPORTS_DIRECTORY = PROJECT_ROOT / "security_reports"
+ALLOWED_REPORT_EXTENSIONS = {".csv", ".json", ".txt", ".log"}
 
 
 def read_networks() -> list[dict]:
@@ -146,6 +150,142 @@ def read_threats() -> list[dict]:
     return findings
 
 
+def _format_file_size(size_bytes: int) -> str:
+    """Convert bytes into a readable file-size label."""
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    if size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f} KB"
+    return f"{size_bytes / (1024 * 1024):.1f} MB"
+
+
+def _report_category(filename: str) -> str:
+    """Return a user-friendly category for a generated report."""
+    lowered = filename.lower()
+
+    if "alert" in lowered or "live" in lowered:
+        return "Alerts and Monitoring"
+    if "historical" in lowered or "trend" in lowered:
+        return "Historical Analysis"
+    if "evidence" in lowered or "analyst" in lowered:
+        return "Investigation"
+    if "pre_connect" in lowered:
+        return "Pre-connect Safety"
+    if "trusted_baseline" in lowered:
+        return "Trusted Baseline"
+    if "advisor" in lowered:
+        return "Security Advice"
+    return "Security Analysis"
+
+
+def _report_description(filename: str) -> str:
+    descriptions = {
+        "final_security_report.csv":
+            "Consolidated wireless findings, scores, risk levels and attack classifications.",
+        "security_advisor_report.json":
+            "Structured security recommendations generated from wireless analysis.",
+        "security_advisor_report.txt":
+            "Readable security recommendations and corrective actions.",
+        "evidence_center_report.json":
+            "Structured evidence collected for detected wireless findings.",
+        "evidence_center_report.txt":
+            "Readable evidence summary for analyst review.",
+        "analyst_review_report.json":
+            "Structured review information for security analysts.",
+        "analyst_review_report.txt":
+            "Readable analyst-review report.",
+        "historical_trend_report.json":
+            "Structured historical wireless-security trends.",
+        "historical_trend_report.txt":
+            "Readable historical trend summary.",
+        "pre_connect_safety_report.csv":
+            "Network safety recommendations before connecting.",
+        "pre_connect_safety_report.json":
+            "Structured pre-connect network safety analysis.",
+        "trusted_baseline_report.csv":
+            "Trusted network baseline records in CSV format.",
+        "trusted_baseline_report.json":
+            "Structured trusted network baseline records.",
+        "alert_notifications.json":
+            "Structured alert-notification history.",
+        "alert_notifications.log":
+            "Readable alert-notification log.",
+        "live_alerts.log":
+            "Live security-monitoring alert log.",
+        "email_alert_preview.json":
+            "Structured preview of generated email alerts.",
+        "email_alert_preview.txt":
+            "Readable preview of generated email alerts.",
+        "security_report.csv":
+            "General wireless-security analysis results.",
+    }
+
+    return descriptions.get(
+        filename,
+        "Generated NetShield wireless-security report.",
+    )
+
+
+def read_reports() -> list[dict]:
+    """List browser-safe report files that currently exist."""
+    if not REPORTS_DIRECTORY.exists():
+        return []
+
+    report_rows: list[dict] = []
+
+    for report_path in REPORTS_DIRECTORY.iterdir():
+        if not report_path.is_file():
+            continue
+
+        extension = report_path.suffix.lower()
+        if extension not in ALLOWED_REPORT_EXTENSIONS:
+            continue
+
+        stat = report_path.stat()
+
+        report_rows.append(
+            {
+                "filename": report_path.name,
+                "title": report_path.stem.replace("_", " ").title(),
+                "type": extension.removeprefix(".").upper(),
+                "category": _report_category(report_path.name),
+                "description": _report_description(report_path.name),
+                "size_bytes": stat.st_size,
+                "size": _format_file_size(stat.st_size),
+                "modified_at": datetime.fromtimestamp(
+                    stat.st_mtime,
+                    tz=timezone.utc,
+                ).isoformat(),
+                "view_url": f"/api/reports/view/{report_path.name}",
+                "download_url": (
+                    f"/api/reports/download/{report_path.name}"
+                ),
+            }
+        )
+
+    return sorted(
+        report_rows,
+        key=lambda report: report["modified_at"],
+        reverse=True,
+    )
+
+
+def _get_safe_report(filename: str) -> Path | None:
+    """Resolve an allowed report without permitting path traversal."""
+    if Path(filename).name != filename:
+        return None
+
+    report_path = REPORTS_DIRECTORY / filename
+
+    if not report_path.is_file():
+        return None
+
+    if report_path.suffix.lower() not in ALLOWED_REPORT_EXTENSIONS:
+        return None
+
+    return report_path
+
+
 @app.get("/api/health")
 def health():
     return jsonify(
@@ -180,6 +320,67 @@ def threats():
             "source": "final_security_report.csv",
             "threats": threat_rows,
         }
+    )
+
+
+@app.get("/api/reports")
+def reports():
+    report_rows = read_reports()
+
+    return jsonify(
+        {
+            "count": len(report_rows),
+            "reports": report_rows,
+        }
+    )
+
+
+@app.get("/api/reports/view/<path:filename>")
+def view_report(filename):
+    report_path = _get_safe_report(filename)
+
+    if report_path is None:
+        return jsonify({"error": "Report not found"}), 404
+
+    content = report_path.read_text(
+        encoding="utf-8",
+        errors="replace",
+    )
+
+    # Make JSON reports easier to read in the browser.
+    if report_path.suffix.lower() == ".json":
+        try:
+            content = json.dumps(
+                json.loads(content),
+                indent=2,
+                ensure_ascii=False,
+            )
+        except json.JSONDecodeError:
+            pass
+
+    return Response(
+        content,
+        status=200,
+        mimetype="text/plain",
+        headers={
+            "Content-Disposition": (
+                f'inline; filename="{report_path.name}"'
+            )
+        },
+    )
+
+
+@app.get("/api/reports/download/<path:filename>")
+def download_report(filename):
+    report_path = _get_safe_report(filename)
+
+    if report_path is None:
+        return jsonify({"error": "Report not found"}), 404
+
+    return send_from_directory(
+        REPORTS_DIRECTORY,
+        report_path.name,
+        as_attachment=True,
     )
 
 
