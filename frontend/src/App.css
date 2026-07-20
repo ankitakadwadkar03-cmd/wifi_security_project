@@ -5689,3 +5689,44 @@ a {
     grid-template-columns: 1fr;
   }
 }
+
+/* Real History API content */
+
+.historyPage .timelineDate {
+  margin: 0 0 8px;
+  color: #67e8f9;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.historyScanDetails {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.historyScanDetails span {
+  padding: 7px 10px;
+  border: 1px solid rgba(0, 200, 255, 0.2);
+  border-radius: 8px;
+  background: rgba(0, 200, 255, 0.07);
+  color: #c5d9e9;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.historyPage .timelineItem > div {
+  min-width: 0;
+}
+
+.historyPage .historyCard p {
+  min-height: 48px;
+}
+
+@media (max-width: 560px) {
+  .historyScanDetails {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+}

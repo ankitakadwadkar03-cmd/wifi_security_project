@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -27,6 +28,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 NETWORK_CSV = PROJECT_ROOT / "scan_results" / "wifi_scan_results.csv"
 SECURITY_REPORT_CSV = PROJECT_ROOT / "security_reports" / "final_security_report.csv"
 REPORTS_DIRECTORY = PROJECT_ROOT / "security_reports"
+HISTORY_DB = PROJECT_ROOT / "security_reports" / "history.db"
 ALLOWED_REPORT_EXTENSIONS = {".csv", ".json", ".txt", ".log"}
 
 
@@ -286,6 +288,115 @@ def _get_safe_report(filename: str) -> Path | None:
     return report_path
 
 
+def read_history() -> dict:
+    """Read saved scan summaries and findings from the history database."""
+    empty_result = {
+        "scan_count": 0,
+        "latest": None,
+        "previous": None,
+        "summaries": [],
+        "recent_findings": [],
+        "trends": {
+            "network_change": None,
+            "score_change": None,
+            "finding_change": None,
+        },
+    }
+
+    if not HISTORY_DB.exists():
+        return empty_result
+
+    try:
+        with sqlite3.connect(HISTORY_DB) as connection:
+            connection.row_factory = sqlite3.Row
+
+            summary_rows = connection.execute(
+                """
+                SELECT
+                    scan_timestamp,
+                    total_networks,
+                    safe_count,
+                    low_risk_count,
+                    warning_count,
+                    danger_count,
+                    rogue_count,
+                    evil_twin_count,
+                    average_security_score
+                FROM scan_summary
+                ORDER BY scan_timestamp DESC
+                """
+            ).fetchall()
+
+            finding_rows = connection.execute(
+                """
+                SELECT
+                    scan_id,
+                    scan_timestamp,
+                    ssid,
+                    bssid,
+                    encryption,
+                    packet_count,
+                    security_score,
+                    risk_level,
+                    attack_type
+                FROM scan_history
+                WHERE UPPER(COALESCE(attack_type, 'NORMAL')) <> 'NORMAL'
+                ORDER BY scan_timestamp DESC, scan_id DESC
+                LIMIT 12
+                """
+            ).fetchall()
+    except sqlite3.Error as database_error:
+        print(f"[WARNING] Unable to read history database: {database_error}")
+        return empty_result
+
+    summaries = []
+
+    for row in summary_rows:
+        summary = dict(row)
+        summary["potential_findings"] = (
+            int(summary.get("rogue_count") or 0)
+            + int(summary.get("evil_twin_count") or 0)
+        )
+        summaries.append(summary)
+
+    findings = [dict(row) for row in finding_rows]
+
+    latest = summaries[0] if summaries else None
+    previous = summaries[1] if len(summaries) > 1 else None
+
+    trends = {
+        "network_change": None,
+        "score_change": None,
+        "finding_change": None,
+    }
+
+    if latest and previous:
+        trends = {
+            "network_change": (
+                int(latest["total_networks"] or 0)
+                - int(previous["total_networks"] or 0)
+            ),
+            "score_change": round(
+                float(latest["average_security_score"] or 0)
+                - float(previous["average_security_score"] or 0),
+                1,
+            ),
+            "finding_change": (
+                int(latest["potential_findings"] or 0)
+                - int(previous["potential_findings"] or 0)
+            ),
+        }
+
+    return {
+        "scan_count": len(summaries),
+        "latest": latest,
+        "previous": previous,
+        "summaries": summaries,
+        "recent_findings": findings,
+        "trends": trends,
+    }
+
+
 @app.get("/api/health")
 def health():
     return jsonify(
@@ -382,6 +493,11 @@ def download_report(filename):
         report_path.name,
         as_attachment=True,
     )
+
+
+@app.get("/api/history")
+def history():
+    return jsonify(read_history())
 
 
 if __name__ == "__main__":
