@@ -1,59 +1,171 @@
-import { threatCards } from "../data/demoData";
+import { useEffect, useState } from "react";
 import StatusBadge from "../components/StatusBadge";
 
+const API_BASE_URL =
+  import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:5000";
+
+function formatAttackType(value) {
+  return String(value || "Unknown")
+    .replaceAll("_", " ")
+    .toLowerCase()
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
 export default function ThreatCenterPage() {
+  const [threats, setThreats] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    const controller = new AbortController();
+
+    async function loadThreats() {
+      try {
+        setLoading(true);
+        setError("");
+
+        const response = await fetch(`${API_BASE_URL}/api/threats`, {
+          signal: controller.signal,
+        });
+
+        if (!response.ok) {
+          throw new Error(`Backend returned HTTP ${response.status}`);
+        }
+
+        const data = await response.json();
+        setThreats(Array.isArray(data.threats) ? data.threats : []);
+      } catch (fetchError) {
+        if (fetchError.name !== "AbortError") {
+          console.error("Failed to load threats:", fetchError);
+          setError(
+            "Unable to connect to the threat-analysis API. Start the Flask backend and refresh this page."
+          );
+        }
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    loadThreats();
+
+    return () => controller.abort();
+  }, []);
+
   return (
     <section className="appPage threatCenterPage">
-
       <div className="pageHeader">
         <span>Security Monitoring</span>
         <h1>Threat Center</h1>
         <p>
-          Review suspicious wireless activities detected by NetShield and
-          understand their severity before connecting to a network.
+          Review potential wireless-security findings produced by NetShield.
+          Automated detections should be verified before taking action.
         </p>
       </div>
 
-      <div className="threatGrid">
+      {loading && (
+        <div className="networkTableMessage">
+          Loading security findings...
+        </div>
+      )}
 
-        {threatCards.map((item) => (
-          <div className="threatCard" key={item.title}>
+      {!loading && error && (
+        <div className="networkTableMessage errorMessage">
+          {error}
+        </div>
+      )}
 
-            <div className="threatTop">
-              <StatusBadge value={item.severity} />
+      {!loading && !error && threats.length === 0 && (
+        <div className="networkTableMessage">
+          No suspicious wireless findings are currently available.
+        </div>
+      )}
+
+      {!loading && !error && threats.length > 0 && (
+        <>
+          <div className="threatSummaryBar">
+            <div>
+              <span>Findings requiring review</span>
+              <strong>{threats.length}</strong>
             </div>
 
-            <h2>{item.title}</h2>
-
-            <p>{item.text}</p>
-
-            <div className="recommendationBox">
-              <h3>Recommendation</h3>
-
-              <ul>
-
-                <li>Verify the network before connecting.</li>
-
-                <li>Check the BSSID and encryption type.</li>
-
-                <li>Avoid unknown or open WiFi networks.</li>
-
-                <li>Disconnect immediately if suspicious behaviour is detected.</li>
-
-              </ul>
-            </div>
-
+            <p>
+              These are potential findings from automated analysis, not
+              confirmed attacks.
+            </p>
           </div>
-        ))}
 
-      </div>
+          <div className="threatGrid">
+            {threats.map((item) => (
+              <div
+                className="threatCard"
+                key={`${item.bssid}-${item.attack_type}`}
+              >
+                <div className="threatTop">
+                  <StatusBadge value={item.severity} />
+                </div>
+
+                <h2>{item.title}</h2>
+                <p>{item.summary}</p>
+
+                <div className="threatDetails">
+                  <div>
+                    <span>SSID</span>
+                    <strong>
+                      {item.ssid === "Unknown_Device"
+                        ? "Unknown network"
+                        : item.ssid}
+                    </strong>
+                  </div>
+
+                  <div>
+                    <span>BSSID</span>
+                    <strong>{item.bssid}</strong>
+                  </div>
+
+                  <div>
+                    <span>Classification</span>
+                    <strong>{formatAttackType(item.attack_type)}</strong>
+                  </div>
+
+                  <div>
+                    <span>Encryption</span>
+                    <strong>{item.encryption}</strong>
+                  </div>
+
+                  <div>
+                    <span>Packets Observed</span>
+                    <strong>{item.total_packets}</strong>
+                  </div>
+
+                  <div>
+                    <span>Risk Level</span>
+                    <strong>{item.risk_level}</strong>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="sharedVerification">
+            <div>
+              <span>Verification checklist</span>
+              <h2>Before treating a finding as a real threat</h2>
+            </div>
+
+            <ul>
+              <li>Compare the BSSID with the trusted router record.</li>
+              <li>Repeat the scan to confirm the access point persists.</li>
+              <li>Verify the network owner before connecting.</li>
+              <li>Review packet evidence and encryption information.</li>
+            </ul>
+          </div>
+        </>
+      )}
 
       <div className="securityTips">
-
         <h2>Best Practices</h2>
 
         <div className="tipsGrid">
-
           <div className="tipCard">
             <h3>Use WPA3</h3>
             <p>
@@ -69,9 +181,10 @@ export default function ThreatCenterPage() {
           </div>
 
           <div className="tipCard">
-            <h3>Monitor Devices</h3>
+            <h3>Verify Network Identity</h3>
             <p>
-              Periodically review connected devices and remove unknown clients.
+              Compare the SSID and BSSID with information provided by the
+              network owner.
             </p>
           </div>
 
@@ -82,11 +195,8 @@ export default function ThreatCenterPage() {
               vulnerabilities.
             </p>
           </div>
-
         </div>
-
       </div>
-
     </section>
   );
 }
