@@ -5415,3 +5415,10 @@ a {
   cursor: not-allowed;
   opacity: 0.5;
 }
+
+/* Neutral status used before threat analysis is completed */
+.statusBadge.unclassified {
+  color: #bfdbfe;
+  border: 1px solid rgba(96, 165, 250, 0.35);
+  background: rgba(59, 130, 246, 0.12);
+}
