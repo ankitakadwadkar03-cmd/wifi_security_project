@@ -5730,3 +5730,52 @@ a {
     grid-template-columns: 1fr;
   }
 }
+
+/* Accurate WiFi signal-strength colours */
+
+.networkTable:not(.head) .signalValue {
+  font-size: 16px;
+  font-weight: 900;
+}
+
+.networkTable:not(.head) .signalStrong {
+  color: #9cff3b;
+}
+
+.networkTable:not(.head) .signalModerate {
+  color: #facc15;
+}
+
+.networkTable:not(.head) .signalWeak {
+  color: #fb923c;
+}
+
+.networkTable:not(.head) .signalVeryWeak {
+  color: #ff5b69;
+}
+
+.networkTable:not(.head) .signalUnknown {
+  color: #94a3b8;
+}
+
+/* Final signal colour override */
+
+.networkTable:not(.head) span.signalValue.signalStrong {
+  color: #9cff3b;
+}
+
+.networkTable:not(.head) span.signalValue.signalModerate {
+  color: #facc15;
+}
+
+.networkTable:not(.head) span.signalValue.signalWeak {
+  color: #fb923c;
+}
+
+.networkTable:not(.head) span.signalValue.signalVeryWeak {
+  color: #ff5b69;
+}
+
+.networkTable:not(.head) span.signalValue.signalUnknown {
+  color: #94a3b8;
+}

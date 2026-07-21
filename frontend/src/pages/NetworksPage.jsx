@@ -4,6 +4,29 @@ import StatusBadge from "../components/StatusBadge";
 const API_BASE_URL =
   import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:5000";
 
+
+function getSignalClass(signal) {
+  const value = Number(signal);
+
+  if (!Number.isFinite(value)) {
+    return "signalUnknown";
+  }
+
+  if (value >= -60) {
+    return "signalStrong";
+  }
+
+  if (value >= -70) {
+    return "signalModerate";
+  }
+
+  if (value >= -80) {
+    return "signalWeak";
+  }
+
+  return "signalVeryWeak";
+}
+
 export default function NetworksPage() {
   const [query, setQuery] = useState("");
   const [networkRows, setNetworkRows] = useState([]);
@@ -187,7 +210,9 @@ export default function NetworksPage() {
               <span>{row.ssid}</span>
               <span>{row.bssid}</span>
               <span>{row.frequency || "Unknown"}</span>
-              <span>
+              <span
+                className={`signalValue ${getSignalClass(row.signal)}`}
+              >
                 {row.signal ? `${row.signal} dBm` : "Unknown"}
               </span>
               <span>{row.channel || "Unknown"}</span>

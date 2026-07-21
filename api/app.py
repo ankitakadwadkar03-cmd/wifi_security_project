@@ -32,11 +32,76 @@ HISTORY_DB = PROJECT_ROOT / "security_reports" / "history.db"
 ALLOWED_REPORT_EXTENSIONS = {".csv", ".json", ".txt", ".log"}
 
 
+def _normalize_bssid(value: str | None) -> str:
+    """Normalize a BSSID so scanner and report rows can be matched."""
+    return str(value or "").strip().upper()
+
+
+def _read_security_report_index() -> dict[str, dict]:
+    """Index security-report rows by BSSID."""
+    if not SECURITY_REPORT_CSV.exists():
+        return {}
+
+    report_index: dict[str, dict] = {}
+
+    with SECURITY_REPORT_CSV.open(
+        "r", encoding="utf-8", newline=""
+    ) as csv_file:
+        reader = csv.DictReader(csv_file)
+
+        for row in reader:
+            bssid = _normalize_bssid(row.get("BSSID"))
+
+            if bssid and bssid not in {"UNKNOWN", "BROADCAST"}:
+                report_index[bssid] = dict(row)
+
+    return report_index
+
+
+def _network_status(report_row: dict | None) -> str:
+    """Convert report risk and attack values into a frontend status."""
+    if not report_row:
+        return "Unclassified"
+
+    attack_type = (
+        report_row.get("Attack_Type") or "NORMAL"
+    ).strip().upper()
+
+    risk_level = (
+        report_row.get("Risk_Level") or "UNKNOWN"
+    ).strip().upper()
+
+    # Any automated attack classification still requires verification,
+    # even when its numeric risk score is marked SAFE.
+    if attack_type not in {"", "NORMAL"}:
+        return "Review"
+
+    return {
+        "SAFE": "Safe",
+        "LOW RISK": "Review",
+        "WARNING": "Warning",
+        "DANGER": "Critical",
+    }.get(risk_level, "Unclassified")
+
+
+def _format_attack_type(report_row: dict | None) -> str:
+    """Return a readable attack classification."""
+    if not report_row:
+        return "No analysis available"
+
+    attack_type = (
+        report_row.get("Attack_Type") or "NORMAL"
+    ).strip().upper()
+
+    return attack_type.replace("_", " ").title()
+
+
 def read_networks() -> list[dict]:
-    """Read and normalize networks from the scanner CSV."""
+    """Read scanner networks and merge matching security-report results."""
     if not NETWORK_CSV.exists():
         return []
 
+    report_index = _read_security_report_index()
     networks: list[dict] = []
 
     with NETWORK_CSV.open("r", encoding="utf-8", newline="") as csv_file:
@@ -44,11 +109,12 @@ def read_networks() -> list[dict]:
 
         for row in reader:
             ssid = (row.get("SSID") or "").strip()
-            bssid = (row.get("BSSID") or "").strip()
+            bssid = _normalize_bssid(row.get("BSSID"))
 
-            # Ignore completely empty rows.
             if not ssid and not bssid:
                 continue
+
+            report_row = report_index.get(bssid)
 
             networks.append(
                 {
@@ -57,18 +123,24 @@ def read_networks() -> list[dict]:
                     "channel": (row.get("Channel") or "").strip(),
                     "frequency": (row.get("Frequency") or "").strip(),
                     "signal": (row.get("Signal") or "").strip(),
-                    "encryption": (row.get("Encryption") or "Unknown").strip(),
-
-                    # These values are intentionally not invented.
-                    # Future modules will provide real vendor/threat analysis.
+                    "encryption": (
+                        row.get("Encryption") or "Unknown"
+                    ).strip(),
                     "vendor": "Not analyzed",
-                    "status": "Unclassified",
-                    "attack": "No analysis available",
+                    "status": _network_status(report_row),
+                    "attack": _format_attack_type(report_row),
+                    "security_score": (
+                        _safe_int(
+                            report_row.get("Suspicious_Score"),
+                            default=100,
+                        )
+                        if report_row
+                        else None
+                    ),
                 }
             )
 
     return networks
-
 
 def _safe_int(value, default=0):
     """Convert a CSV value to an integer without crashing."""
