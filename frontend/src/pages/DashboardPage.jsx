@@ -6,6 +6,8 @@ const API_BASE_URL =
 
 export default function DashboardPage({ setCurrentPage }) {
   const [networks, setNetworks] = useState([]);
+  const [threats, setThreats] = useState([]);
+  const [latestHistory, setLatestHistory] = useState(null);
   const [backendStatus, setBackendStatus] = useState("Checking");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -18,32 +20,63 @@ export default function DashboardPage({ setCurrentPage }) {
         setLoading(true);
         setError("");
 
-        const [healthResponse, networksResponse] = await Promise.all([
+        const [
+          healthResponse,
+          networksResponse,
+          threatsResponse,
+          historyResponse,
+        ] = await Promise.all([
           fetch(`${API_BASE_URL}/api/health`, {
             signal: controller.signal,
           }),
           fetch(`${API_BASE_URL}/api/networks`, {
             signal: controller.signal,
           }),
+          fetch(`${API_BASE_URL}/api/threats`, {
+            signal: controller.signal,
+          }),
+          fetch(`${API_BASE_URL}/api/history`, {
+            signal: controller.signal,
+          }),
         ]);
 
-        if (!healthResponse.ok || !networksResponse.ok) {
-          throw new Error("The NetShield backend returned an error.");
+        if (
+          !healthResponse.ok ||
+          !networksResponse.ok ||
+          !threatsResponse.ok ||
+          !historyResponse.ok
+        ) {
+          throw new Error("One or more NetShield API routes returned an error.");
         }
 
         const healthData = await healthResponse.json();
         const networkData = await networksResponse.json();
+        const threatData = await threatsResponse.json();
+        const historyData = await historyResponse.json();
 
-        setBackendStatus(healthData.status === "ok" ? "Active" : "Offline");
-        setNetworks(
-          Array.isArray(networkData.networks) ? networkData.networks : []
+        setBackendStatus(
+          healthData.status === "ok" ? "Active" : "Offline"
         );
+
+        setNetworks(
+          Array.isArray(networkData.networks)
+            ? networkData.networks
+            : []
+        );
+
+        setThreats(
+          Array.isArray(threatData.threats)
+            ? threatData.threats
+            : []
+        );
+
+        setLatestHistory(historyData.latest || null);
       } catch (fetchError) {
         if (fetchError.name !== "AbortError") {
           console.error("Dashboard API error:", fetchError);
           setBackendStatus("Offline");
           setError(
-            "Unable to connect to the NetShield backend. Start the Flask API and refresh this page."
+            "Unable to load complete NetShield data. Check that the Flask backend is running and refresh this page."
           );
         }
       } finally {
@@ -57,6 +90,13 @@ export default function DashboardPage({ setCurrentPage }) {
   }, []);
 
   const recentNetworks = networks.slice(0, 5);
+  const latestThreat = threats[0];
+
+  const securityScore = latestHistory
+    ? `${Number(
+        latestHistory.average_security_score
+      ).toFixed(0)}%`
+    : "—";
 
   return (
     <section className="appPage dashboardPage">
@@ -64,8 +104,8 @@ export default function DashboardPage({ setCurrentPage }) {
         <span>Monitoring Console</span>
         <h1>Dashboard</h1>
         <p>
-          Overview of real wireless scan results, backend availability and
-          security-analysis status.
+          Overview of real wireless scan results, backend availability,
+          potential security findings and saved analysis history.
         </p>
       </div>
 
@@ -75,8 +115,8 @@ export default function DashboardPage({ setCurrentPage }) {
           <strong>{backendStatus}</strong>
           <p>
             {backendStatus === "Active"
-              ? "Scanner API is available"
-              : "Scanner API is not available"}
+              ? "NetShield API is available"
+              : "NetShield API is not available"}
           </p>
         </div>
 
@@ -87,15 +127,19 @@ export default function DashboardPage({ setCurrentPage }) {
         </div>
 
         <div className="metricCard danger">
-          <span>Threats Found</span>
-          <strong>—</strong>
-          <p>Threat-detection module not connected yet</p>
+          <span>Potential Findings</span>
+          <strong>{loading ? "..." : threats.length}</strong>
+          <p>
+            {threats.length === 1
+              ? "1 automated finding requires review"
+              : `${threats.length} automated findings require review`}
+          </p>
         </div>
 
         <div className="metricCard success">
           <span>Security Score</span>
-          <strong>—</strong>
-          <p>Available after real threat analysis</p>
+          <strong>{loading ? "..." : securityScore}</strong>
+          <p>Latest saved historical analysis score</p>
         </div>
       </div>
 
@@ -109,6 +153,7 @@ export default function DashboardPage({ setCurrentPage }) {
         <div className="largePanel">
           <div className="panelTitle">
             <h2>Recent Wireless Findings</h2>
+
             <button
               type="button"
               onClick={() => setCurrentPage("networks")}
@@ -156,20 +201,44 @@ export default function DashboardPage({ setCurrentPage }) {
         </div>
 
         <div className="sidePanel">
-          <h2>Latest Alert</h2>
-          <StatusBadge value="Unclassified" />
-          <h3>Threat analysis pending</h3>
-          <p>
-            Wireless networks have been discovered successfully. Connect the
-            threat-detection modules before classifying access points or
-            generating security alerts.
-          </p>
-          <button
-            type="button"
-            onClick={() => setCurrentPage("threats")}
-          >
-            Open Threat Center
-          </button>
+          <h2>Latest Finding</h2>
+
+          {latestThreat ? (
+            <>
+              <StatusBadge value={latestThreat.severity} />
+
+              <h3>{latestThreat.title}</h3>
+
+              <p>
+                BSSID: {latestThreat.bssid}. {latestThreat.summary}
+              </p>
+
+              <button
+                type="button"
+                onClick={() => setCurrentPage("threats")}
+              >
+                Review Findings
+              </button>
+            </>
+          ) : (
+            <>
+              <StatusBadge value="Safe" />
+
+              <h3>No potential findings</h3>
+
+              <p>
+                The latest security report contains no automated
+                findings requiring review.
+              </p>
+
+              <button
+                type="button"
+                onClick={() => setCurrentPage("threats")}
+              >
+                Open Threat Center
+              </button>
+            </>
+          )}
         </div>
       </div>
     </section>
