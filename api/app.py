@@ -2,11 +2,18 @@ from __future__ import annotations
 
 import csv
 import json
+import os
+import signal
+import sys
+import threading
+import time
 import sqlite3
+import shutil
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
-from flask import Flask, Response, jsonify, send_from_directory
+from flask import Flask, Response, jsonify, request, send_from_directory
 from flask_cors import CORS
 
 app = Flask(__name__)
@@ -30,6 +37,23 @@ SECURITY_REPORT_CSV = PROJECT_ROOT / "security_reports" / "final_security_report
 REPORTS_DIRECTORY = PROJECT_ROOT / "security_reports"
 HISTORY_DB = PROJECT_ROOT / "security_reports" / "history.db"
 ALLOWED_REPORT_EXTENSIONS = {".csv", ".json", ".txt", ".log"}
+
+SCANNER_SCRIPT = PROJECT_ROOT / "scanner" / "wifi_scanner.py"
+SCANNER_LOG_PATH = PROJECT_ROOT / "scanner" / "scanner_control.log"
+
+SCANNER_PROCESS = None
+SCANNER_LOG_HANDLE = None
+SCANNER_LOCK = threading.Lock()
+
+SCANNER_STATE = {
+    "state": "idle",
+    "interface": None,
+    "pid": None,
+    "started_at": None,
+    "stopped_at": None,
+    "last_error": "",
+    "message": "Scanner is idle.",
+}
 
 
 def _normalize_bssid(value: str | None) -> str:
@@ -469,6 +493,368 @@ def read_history() -> dict:
     }
 
 
+def read_adapter_status() -> dict:
+    """Detect available Linux wireless interfaces using the iw command."""
+    if shutil.which("iw") is None:
+        return {
+            "available": False,
+            "state": "command_missing",
+            "interfaces": [],
+            "message": "The iw command is not installed.",
+        }
+
+    try:
+        result = subprocess.run(
+            ["iw", "dev"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError) as command_error:
+        return {
+            "available": False,
+            "state": "error",
+            "interfaces": [],
+            "message": f"Unable to inspect wireless interfaces: {command_error}",
+        }
+
+    if result.returncode != 0:
+        return {
+            "available": False,
+            "state": "error",
+            "interfaces": [],
+            "message": (
+                result.stderr.strip()
+                or "The iw command could not inspect wireless interfaces."
+            ),
+        }
+
+    interfaces = []
+    current_interface = None
+
+    for raw_line in result.stdout.splitlines():
+        line = raw_line.strip()
+
+        if line.startswith("Interface "):
+            if current_interface:
+                interfaces.append(current_interface)
+
+            current_interface = {
+                "name": line.split(" ", 1)[1].strip(),
+                "mode": "unknown",
+            }
+
+        elif line.startswith("type ") and current_interface:
+            current_interface["mode"] = line.split(" ", 1)[1].strip()
+
+    if current_interface:
+        interfaces.append(current_interface)
+
+    if not interfaces:
+        return {
+            "available": False,
+            "state": "not_detected",
+            "interfaces": [],
+            "message": "No wireless adapter is currently detected.",
+        }
+
+    return {
+        "available": True,
+        "state": "idle",
+        "interfaces": interfaces,
+        "message": f"{len(interfaces)} wireless interface(s) detected.",
+    }
+
+
+def _utc_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _read_scanner_log_tail(max_lines: int = 10) -> str:
+    """Read the latest scanner log lines for useful error messages."""
+    if not SCANNER_LOG_PATH.exists():
+        return ""
+
+    try:
+        lines = SCANNER_LOG_PATH.read_text(
+            encoding="utf-8",
+            errors="replace",
+        ).splitlines()
+
+        return "\n".join(lines[-max_lines:])
+    except OSError:
+        return ""
+
+
+def _close_scanner_log_locked() -> None:
+    global SCANNER_LOG_HANDLE
+
+    if SCANNER_LOG_HANDLE is not None:
+        try:
+            SCANNER_LOG_HANDLE.close()
+        except OSError:
+            pass
+
+        SCANNER_LOG_HANDLE = None
+
+
+def _refresh_scanner_state_locked() -> None:
+    """Update scanner state when the child process has exited."""
+    global SCANNER_PROCESS
+
+    if SCANNER_PROCESS is None:
+        return
+
+    exit_code = SCANNER_PROCESS.poll()
+
+    if exit_code is None:
+        return
+
+    SCANNER_STATE["pid"] = None
+    SCANNER_STATE["stopped_at"] = _utc_timestamp()
+
+    if exit_code == 0:
+        SCANNER_STATE["state"] = "idle"
+        SCANNER_STATE["message"] = "Scanner stopped normally."
+        SCANNER_STATE["last_error"] = ""
+    else:
+        SCANNER_STATE["state"] = "error"
+        SCANNER_STATE["message"] = (
+            f"Scanner exited with code {exit_code}."
+        )
+        SCANNER_STATE["last_error"] = _read_scanner_log_tail()
+
+    SCANNER_PROCESS = None
+    _close_scanner_log_locked()
+
+
+def read_scanner_status() -> dict:
+    """Return scanner process and wireless-adapter status."""
+    with SCANNER_LOCK:
+        _refresh_scanner_state_locked()
+        scanner_state = dict(SCANNER_STATE)
+
+    adapter = read_adapter_status()
+
+    scanner_state["running"] = scanner_state["state"] in {
+        "starting",
+        "running",
+        "stopping",
+    }
+    scanner_state["adapter"] = adapter
+
+    return scanner_state
+
+
+def start_scanner_process(interface: str | None = None) -> tuple[dict, int]:
+    """Start the scanner for one validated wireless interface."""
+    global SCANNER_PROCESS
+    global SCANNER_LOG_HANDLE
+
+    adapter = read_adapter_status()
+
+    if not adapter["available"]:
+        return {
+            "ok": False,
+            "state": "not_detected",
+            "message": adapter["message"],
+        }, 409
+
+    interface_names = [
+        item["name"]
+        for item in adapter["interfaces"]
+    ]
+
+    selected_interface = interface or interface_names[0]
+
+    if selected_interface not in interface_names:
+        return {
+            "ok": False,
+            "state": "invalid_interface",
+            "message": (
+                f"Wireless interface '{selected_interface}' "
+                "is not currently available."
+            ),
+        }, 400
+
+    with SCANNER_LOCK:
+        _refresh_scanner_state_locked()
+
+        if SCANNER_PROCESS is not None:
+            return {
+                "ok": False,
+                "state": SCANNER_STATE["state"],
+                "message": "A scanner process is already running.",
+                "scanner": dict(SCANNER_STATE),
+            }, 409
+
+        if not SCANNER_SCRIPT.exists():
+            return {
+                "ok": False,
+                "state": "error",
+                "message": "The WiFi scanner script was not found.",
+            }, 500
+
+        command = [
+            sys.executable,
+            str(SCANNER_SCRIPT),
+            "--interface",
+            selected_interface,
+        ]
+
+        # Do not run the Flask web application as root and do not
+        # execute editable project files through unrestricted sudo.
+        # A restricted scanner service will be configured separately.
+        if os.geteuid() != 0:
+            return {
+                "ok": False,
+                "state": "permission_required",
+                "message": (
+                    "Secure scanner permissions are not configured yet. "
+                    "Do not run the Flask backend as root."
+                ),
+            }, 403
+
+        SCANNER_LOG_PATH.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        SCANNER_LOG_HANDLE = SCANNER_LOG_PATH.open(
+            "a",
+            encoding="utf-8",
+        )
+
+        SCANNER_LOG_HANDLE.write(
+            f"\n[{_utc_timestamp()}] Starting scanner on "
+            f"{selected_interface}\n"
+        )
+        SCANNER_LOG_HANDLE.flush()
+
+        try:
+            SCANNER_PROCESS = subprocess.Popen(
+                command,
+                cwd=PROJECT_ROOT,
+                stdout=SCANNER_LOG_HANDLE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                start_new_session=True,
+            )
+        except OSError as process_error:
+            _close_scanner_log_locked()
+
+            SCANNER_STATE.update(
+                {
+                    "state": "error",
+                    "interface": selected_interface,
+                    "pid": None,
+                    "last_error": str(process_error),
+                    "message": "Unable to start the scanner process.",
+                }
+            )
+
+            return {
+                "ok": False,
+                "scanner": dict(SCANNER_STATE),
+            }, 500
+
+        SCANNER_STATE.update(
+            {
+                "state": "starting",
+                "interface": selected_interface,
+                "pid": SCANNER_PROCESS.pid,
+                "started_at": _utc_timestamp(),
+                "stopped_at": None,
+                "last_error": "",
+                "message": (
+                    f"Starting scanner on {selected_interface}."
+                ),
+            }
+        )
+
+    # Give immediate setup failures a moment to appear.
+    time.sleep(0.5)
+
+    with SCANNER_LOCK:
+        _refresh_scanner_state_locked()
+
+        if SCANNER_PROCESS is None:
+            return {
+                "ok": False,
+                "scanner": dict(SCANNER_STATE),
+            }, 500
+
+        SCANNER_STATE["state"] = "running"
+        SCANNER_STATE["message"] = (
+            f"Scanning on {selected_interface}."
+        )
+
+        return {
+            "ok": True,
+            "scanner": dict(SCANNER_STATE),
+        }, 202
+
+
+def stop_scanner_process() -> tuple[dict, int]:
+    """Stop the running scanner and allow it to save the latest CSV."""
+    global SCANNER_PROCESS
+
+    with SCANNER_LOCK:
+        _refresh_scanner_state_locked()
+
+        if SCANNER_PROCESS is None:
+            SCANNER_STATE.update(
+                {
+                    "state": "idle",
+                    "pid": None,
+                    "message": "Scanner is already stopped.",
+                }
+            )
+
+            return {
+                "ok": True,
+                "scanner": dict(SCANNER_STATE),
+            }, 200
+
+        process = SCANNER_PROCESS
+
+        SCANNER_STATE["state"] = "stopping"
+        SCANNER_STATE["message"] = "Stopping scanner safely."
+
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+        process.wait(timeout=30)
+    except ProcessLookupError:
+        pass
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=5)
+        except (ProcessLookupError, subprocess.TimeoutExpired):
+            pass
+
+    with SCANNER_LOCK:
+        SCANNER_PROCESS = None
+        SCANNER_STATE.update(
+            {
+                "state": "idle",
+                "pid": None,
+                "stopped_at": _utc_timestamp(),
+                "last_error": "",
+                "message": (
+                    "Scanner stopped. Latest CSV results were preserved."
+                ),
+            }
+        )
+        _close_scanner_log_locked()
+
+        return {
+            "ok": True,
+            "scanner": dict(SCANNER_STATE),
+        }, 200
+
+
 @app.get("/api/health")
 def health():
     return jsonify(
@@ -572,5 +958,30 @@ def history():
     return jsonify(read_history())
 
 
+@app.get("/api/adapter/status")
+def adapter_status():
+    return jsonify(read_adapter_status())
+
+
+@app.get("/api/scanner/status")
+def scanner_status():
+    return jsonify(read_scanner_status())
+
+
+@app.post("/api/scanner/start")
+def scanner_start():
+    request_data = request.get_json(silent=True) or {}
+    response, status_code = start_scanner_process(
+        request_data.get("interface")
+    )
+    return jsonify(response), status_code
+
+
+@app.post("/api/scanner/stop")
+def scanner_stop():
+    response, status_code = stop_scanner_process()
+    return jsonify(response), status_code
+
+
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5000, debug=True)
+    app.run(host="127.0.0.1", port=5000, debug=True, use_reloader=False)
