@@ -38,22 +38,9 @@ REPORTS_DIRECTORY = PROJECT_ROOT / "security_reports"
 HISTORY_DB = PROJECT_ROOT / "security_reports" / "history.db"
 ALLOWED_REPORT_EXTENSIONS = {".csv", ".json", ".txt", ".log"}
 
-SCANNER_SCRIPT = PROJECT_ROOT / "scanner" / "wifi_scanner.py"
-SCANNER_LOG_PATH = PROJECT_ROOT / "scanner" / "scanner_control.log"
-
-SCANNER_PROCESS = None
-SCANNER_LOG_HANDLE = None
-SCANNER_LOCK = threading.Lock()
-
-SCANNER_STATE = {
-    "state": "idle",
-    "interface": None,
-    "pid": None,
-    "started_at": None,
-    "stopped_at": None,
-    "last_error": "",
-    "message": "Scanner is idle.",
-}
+SYSTEMCTL_PATH = "/usr/bin/systemctl"
+SCANNER_SERVICE_NAME = "netshield-scanner.service"
+SCANNER_SERVICE_INTERFACE = "wlan0"
 
 
 def _normalize_bssid(value: str | None) -> str:
@@ -567,91 +554,141 @@ def read_adapter_status() -> dict:
     }
 
 
-def _utc_timestamp() -> str:
-    return datetime.now(timezone.utc).isoformat()
+
+def _run_scanner_service_command(
+    arguments: list[str],
+    timeout: int = 50,
+) -> tuple[int, str, str]:
+    """Run one narrowly permitted systemctl command through sudo."""
+    try:
+        result = subprocess.run(
+            [
+                "sudo",
+                "-n",
+                SYSTEMCTL_PATH,
+                *arguments,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired) as command_error:
+        return -1, "", str(command_error)
+
+    return (
+        result.returncode,
+        result.stdout.strip(),
+        result.stderr.strip(),
+    )
 
 
-def _read_scanner_log_tail(max_lines: int = 10) -> str:
-    """Read the latest scanner log lines for useful error messages."""
-    if not SCANNER_LOG_PATH.exists():
-        return ""
+def _read_scanner_service_state() -> tuple[str, str]:
+    """Return the current systemd service state and any error details."""
+    return_code, output, error = _run_scanner_service_command(
+        ["is-active", SCANNER_SERVICE_NAME],
+        timeout=10,
+    )
+
+    service_state = output.strip().lower()
+
+    if return_code == 0:
+        return service_state or "active", ""
+
+    if service_state in {
+        "inactive",
+        "failed",
+        "activating",
+        "deactivating",
+    }:
+        return service_state, error
+
+    return (
+        "error",
+        error
+        or output
+        or "Unable to read the NetShield scanner service state.",
+    )
+
+
+def _read_scanner_service_pid() -> int | None:
+    """Return the scanner service MainPID when one is available."""
+    return_code, output, _error = _run_scanner_service_command(
+        [
+            "show",
+            SCANNER_SERVICE_NAME,
+            "--property=MainPID",
+            "--value",
+        ],
+        timeout=10,
+    )
+
+    if return_code != 0:
+        return None
 
     try:
-        lines = SCANNER_LOG_PATH.read_text(
-            encoding="utf-8",
-            errors="replace",
-        ).splitlines()
+        process_id = int(output)
+    except (TypeError, ValueError):
+        return None
 
-        return "\n".join(lines[-max_lines:])
-    except OSError:
-        return ""
-
-
-def _close_scanner_log_locked() -> None:
-    global SCANNER_LOG_HANDLE
-
-    if SCANNER_LOG_HANDLE is not None:
-        try:
-            SCANNER_LOG_HANDLE.close()
-        except OSError:
-            pass
-
-        SCANNER_LOG_HANDLE = None
-
-
-def _refresh_scanner_state_locked() -> None:
-    """Update scanner state when the child process has exited."""
-    global SCANNER_PROCESS
-
-    if SCANNER_PROCESS is None:
-        return
-
-    exit_code = SCANNER_PROCESS.poll()
-
-    if exit_code is None:
-        return
-
-    SCANNER_STATE["pid"] = None
-    SCANNER_STATE["stopped_at"] = _utc_timestamp()
-
-    if exit_code == 0:
-        SCANNER_STATE["state"] = "idle"
-        SCANNER_STATE["message"] = "Scanner stopped normally."
-        SCANNER_STATE["last_error"] = ""
-    else:
-        SCANNER_STATE["state"] = "error"
-        SCANNER_STATE["message"] = (
-            f"Scanner exited with code {exit_code}."
-        )
-        SCANNER_STATE["last_error"] = _read_scanner_log_tail()
-
-    SCANNER_PROCESS = None
-    _close_scanner_log_locked()
+    return process_id if process_id > 0 else None
 
 
 def read_scanner_status() -> dict:
-    """Return scanner process and wireless-adapter status."""
-    with SCANNER_LOCK:
-        _refresh_scanner_state_locked()
-        scanner_state = dict(SCANNER_STATE)
+    """Return protected scanner-service and adapter status."""
+    service_state, service_error = _read_scanner_service_state()
 
-    adapter = read_adapter_status()
+    state_mapping = {
+        "active": "running",
+        "activating": "starting",
+        "deactivating": "stopping",
+        "inactive": "idle",
+        "failed": "error",
+        "error": "error",
+    }
 
-    scanner_state["running"] = scanner_state["state"] in {
+    scanner_state = state_mapping.get(service_state, "error")
+    running = scanner_state in {
         "starting",
         "running",
         "stopping",
     }
-    scanner_state["adapter"] = adapter
 
-    return scanner_state
+    messages = {
+        "starting": (
+            f"Starting scanner on {SCANNER_SERVICE_INTERFACE}."
+        ),
+        "running": (
+            f"Scanning on {SCANNER_SERVICE_INTERFACE}."
+        ),
+        "stopping": "Stopping scanner safely.",
+        "idle": "Scanner is idle.",
+        "error": (
+            "The scanner service encountered an error."
+        ),
+    }
+
+    return {
+        "state": scanner_state,
+        "running": running,
+        "interface": (
+            SCANNER_SERVICE_INTERFACE if running else None
+        ),
+        "pid": (
+            _read_scanner_service_pid() if running else None
+        ),
+        "started_at": None,
+        "stopped_at": None,
+        "last_error": service_error,
+        "message": messages[scanner_state],
+        "adapter": read_adapter_status(),
+    }
 
 
-def start_scanner_process(interface: str | None = None) -> tuple[dict, int]:
-    """Start the scanner for one validated wireless interface."""
-    global SCANNER_PROCESS
-    global SCANNER_LOG_HANDLE
-
+def start_scanner_process(
+    interface: str | None = None,
+) -> tuple[dict, int]:
+    """Start the protected NetShield scanner service."""
     adapter = read_adapter_status()
 
     if not adapter["available"]:
@@ -678,181 +715,87 @@ def start_scanner_process(interface: str | None = None) -> tuple[dict, int]:
             ),
         }, 400
 
-    with SCANNER_LOCK:
-        _refresh_scanner_state_locked()
-
-        if SCANNER_PROCESS is not None:
-            return {
-                "ok": False,
-                "state": SCANNER_STATE["state"],
-                "message": "A scanner process is already running.",
-                "scanner": dict(SCANNER_STATE),
-            }, 409
-
-        if not SCANNER_SCRIPT.exists():
-            return {
-                "ok": False,
-                "state": "error",
-                "message": "The WiFi scanner script was not found.",
-            }, 500
-
-        command = [
-            sys.executable,
-            str(SCANNER_SCRIPT),
-            "--interface",
-            selected_interface,
-        ]
-
-        # Do not run the Flask web application as root and do not
-        # execute editable project files through unrestricted sudo.
-        # A restricted scanner service will be configured separately.
-        if os.geteuid() != 0:
-            return {
-                "ok": False,
-                "state": "permission_required",
-                "message": (
-                    "Secure scanner permissions are not configured yet. "
-                    "Do not run the Flask backend as root."
-                ),
-            }, 403
-
-        SCANNER_LOG_PATH.parent.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
-
-        SCANNER_LOG_HANDLE = SCANNER_LOG_PATH.open(
-            "a",
-            encoding="utf-8",
-        )
-
-        SCANNER_LOG_HANDLE.write(
-            f"\n[{_utc_timestamp()}] Starting scanner on "
-            f"{selected_interface}\n"
-        )
-        SCANNER_LOG_HANDLE.flush()
-
-        try:
-            SCANNER_PROCESS = subprocess.Popen(
-                command,
-                cwd=PROJECT_ROOT,
-                stdout=SCANNER_LOG_HANDLE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                start_new_session=True,
-            )
-        except OSError as process_error:
-            _close_scanner_log_locked()
-
-            SCANNER_STATE.update(
-                {
-                    "state": "error",
-                    "interface": selected_interface,
-                    "pid": None,
-                    "last_error": str(process_error),
-                    "message": "Unable to start the scanner process.",
-                }
-            )
-
-            return {
-                "ok": False,
-                "scanner": dict(SCANNER_STATE),
-            }, 500
-
-        SCANNER_STATE.update(
-            {
-                "state": "starting",
-                "interface": selected_interface,
-                "pid": SCANNER_PROCESS.pid,
-                "started_at": _utc_timestamp(),
-                "stopped_at": None,
-                "last_error": "",
-                "message": (
-                    f"Starting scanner on {selected_interface}."
-                ),
-            }
-        )
-
-    # Give immediate setup failures a moment to appear.
-    time.sleep(0.5)
-
-    with SCANNER_LOCK:
-        _refresh_scanner_state_locked()
-
-        if SCANNER_PROCESS is None:
-            return {
-                "ok": False,
-                "scanner": dict(SCANNER_STATE),
-            }, 500
-
-        SCANNER_STATE["state"] = "running"
-        SCANNER_STATE["message"] = (
-            f"Scanning on {selected_interface}."
-        )
-
+    if selected_interface != SCANNER_SERVICE_INTERFACE:
         return {
-            "ok": True,
-            "scanner": dict(SCANNER_STATE),
-        }, 202
+            "ok": False,
+            "state": "interface_not_configured",
+            "message": (
+                "The protected scanner service is configured for "
+                f"{SCANNER_SERVICE_INTERFACE}, not "
+                f"{selected_interface}."
+            ),
+        }, 409
+
+    current_status = read_scanner_status()
+
+    if current_status["running"]:
+        return {
+            "ok": False,
+            "state": current_status["state"],
+            "message": "The scanner is already running.",
+            "scanner": current_status,
+        }, 409
+
+    return_code, output, error = _run_scanner_service_command(
+        ["start", SCANNER_SERVICE_NAME],
+    )
+
+    if return_code != 0:
+        return {
+            "ok": False,
+            "state": "error",
+            "message": (
+                error
+                or output
+                or "Unable to start the scanner service."
+            ),
+        }, 500
+
+    scanner_status = read_scanner_status()
+
+    return {
+        "ok": True,
+        "scanner": scanner_status,
+    }, 202
 
 
 def stop_scanner_process() -> tuple[dict, int]:
-    """Stop the running scanner and allow it to save the latest CSV."""
-    global SCANNER_PROCESS
+    """Stop the protected scanner service safely."""
+    current_status = read_scanner_status()
 
-    with SCANNER_LOCK:
-        _refresh_scanner_state_locked()
-
-        if SCANNER_PROCESS is None:
-            SCANNER_STATE.update(
-                {
-                    "state": "idle",
-                    "pid": None,
-                    "message": "Scanner is already stopped.",
-                }
-            )
-
-            return {
-                "ok": True,
-                "scanner": dict(SCANNER_STATE),
-            }, 200
-
-        process = SCANNER_PROCESS
-
-        SCANNER_STATE["state"] = "stopping"
-        SCANNER_STATE["message"] = "Stopping scanner safely."
-
-    try:
-        os.killpg(process.pid, signal.SIGTERM)
-        process.wait(timeout=30)
-    except ProcessLookupError:
-        pass
-    except subprocess.TimeoutExpired:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-            process.wait(timeout=5)
-        except (ProcessLookupError, subprocess.TimeoutExpired):
-            pass
-
-    with SCANNER_LOCK:
-        SCANNER_PROCESS = None
-        SCANNER_STATE.update(
-            {
-                "state": "idle",
-                "pid": None,
-                "stopped_at": _utc_timestamp(),
-                "last_error": "",
-                "message": (
-                    "Scanner stopped. Latest CSV results were preserved."
-                ),
-            }
-        )
-        _close_scanner_log_locked()
+    if not current_status["running"]:
+        current_status["state"] = "idle"
+        current_status["message"] = "Scanner is already stopped."
 
         return {
             "ok": True,
-            "scanner": dict(SCANNER_STATE),
+            "scanner": current_status,
         }, 200
+
+    return_code, output, error = _run_scanner_service_command(
+        ["stop", SCANNER_SERVICE_NAME],
+    )
+
+    if return_code != 0:
+        return {
+            "ok": False,
+            "state": "error",
+            "message": (
+                error
+                or output
+                or "Unable to stop the scanner service."
+            ),
+        }, 500
+
+    scanner_status = read_scanner_status()
+    scanner_status["message"] = (
+        "Scanner stopped. Latest CSV results were preserved."
+    )
+
+    return {
+        "ok": True,
+        "scanner": scanner_status,
+    }, 200
 
 
 @app.get("/api/health")

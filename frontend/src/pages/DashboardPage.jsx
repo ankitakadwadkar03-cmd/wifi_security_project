@@ -318,7 +318,9 @@ export default function DashboardPage({ setCurrentPage }) {
             <p>
               {scannerStatus.interface
                 ? `Scanner interface: ${scannerStatus.interface}`
-                : "Connect a compatible USB WiFi adapter."}
+                : adapter.available
+                  ? "Wireless interface is ready for scanning."
+                  : "Connect a compatible USB WiFi adapter."}
             </p>
           </div>
 
