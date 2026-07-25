@@ -370,3 +370,94 @@ WiFi Scan
 ## Important Demo Note
 
 Some alerts are marked as possible rogue AP or possible Evil Twin based on suspicious indicators such as unknown BSSIDs, duplicate SSIDs, packet differences, and risk scores. These alerts are investigation indicators, not final proof of an attack.
+
+## Web Dashboard Scanner Control
+
+The React Dashboard can start and stop the WiFi scanner through the Flask API.
+
+For security, Flask runs as the normal user. Root-required wireless scanning is handled by the protected systemd service:
+
+```text
+netshield-scanner.service
+```
+
+### Install the scanner service
+
+From the project root:
+
+```bash
+chmod +x deployment/install_scanner_service.sh
+./deployment/install_scanner_service.sh
+```
+
+The installer:
+
+- Copies the scanner into `/opt/netshield-scanner/`.
+- Creates a dedicated Python environment.
+- Installs Scapy.
+- Creates the NetShield systemd service.
+- Gives the current user permission to control only that service.
+- Does not enable scanning automatically at startup.
+
+### Confirm the adapter
+
+Attach the USB WiFi adapter to the Kali virtual machine:
+
+```bash
+lsusb
+iw dev
+```
+
+The expected interface is:
+
+```text
+Interface wlan0
+type managed
+```
+
+### Start the Flask backend
+
+```bash
+cd ~/Projects/wifi_security_project
+source .venv/bin/activate
+python api/app.py
+```
+
+### Start the React frontend
+
+In another terminal:
+
+```bash
+cd ~/Projects/wifi_security_project/frontend
+npm run dev
+```
+
+Open:
+
+```text
+http://localhost:5173
+```
+
+Go to the Dashboard and use **Start Scan** or **Stop Scan**.
+
+During scanning, the adapter temporarily changes from `wlan0` in managed mode to `wlan0mon` in monitor mode. When scanning stops, NetShield saves the latest CSV and restores `wlan0` automatically.
+
+### Scanner API routes
+
+```text
+GET  /api/scanner/status
+POST /api/scanner/start
+POST /api/scanner/stop
+```
+
+Example Start Scan request:
+
+```json
+{
+  "interface": "wlan0"
+}
+```
+
+## Ethical Use
+
+Use NetShield only on wireless networks and environments that you own or have explicit permission to assess. Automated findings are investigation indicators and are not final proof of an attack.

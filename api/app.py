@@ -2,11 +2,18 @@ from __future__ import annotations
 
 import csv
 import json
+import os
+import signal
+import sys
+import threading
+import time
 import sqlite3
+import shutil
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
-from flask import Flask, Response, jsonify, send_from_directory
+from flask import Flask, Response, jsonify, request, send_from_directory
 from flask_cors import CORS
 
 app = Flask(__name__)
@@ -30,6 +37,10 @@ SECURITY_REPORT_CSV = PROJECT_ROOT / "security_reports" / "final_security_report
 REPORTS_DIRECTORY = PROJECT_ROOT / "security_reports"
 HISTORY_DB = PROJECT_ROOT / "security_reports" / "history.db"
 ALLOWED_REPORT_EXTENSIONS = {".csv", ".json", ".txt", ".log"}
+
+SYSTEMCTL_PATH = "/usr/bin/systemctl"
+SCANNER_SERVICE_NAME = "netshield-scanner.service"
+SCANNER_SERVICE_INTERFACE = "wlan0"
 
 
 def _normalize_bssid(value: str | None) -> str:
@@ -469,6 +480,324 @@ def read_history() -> dict:
     }
 
 
+def read_adapter_status() -> dict:
+    """Detect available Linux wireless interfaces using the iw command."""
+    if shutil.which("iw") is None:
+        return {
+            "available": False,
+            "state": "command_missing",
+            "interfaces": [],
+            "message": "The iw command is not installed.",
+        }
+
+    try:
+        result = subprocess.run(
+            ["iw", "dev"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError) as command_error:
+        return {
+            "available": False,
+            "state": "error",
+            "interfaces": [],
+            "message": f"Unable to inspect wireless interfaces: {command_error}",
+        }
+
+    if result.returncode != 0:
+        return {
+            "available": False,
+            "state": "error",
+            "interfaces": [],
+            "message": (
+                result.stderr.strip()
+                or "The iw command could not inspect wireless interfaces."
+            ),
+        }
+
+    interfaces = []
+    current_interface = None
+
+    for raw_line in result.stdout.splitlines():
+        line = raw_line.strip()
+
+        if line.startswith("Interface "):
+            if current_interface:
+                interfaces.append(current_interface)
+
+            current_interface = {
+                "name": line.split(" ", 1)[1].strip(),
+                "mode": "unknown",
+            }
+
+        elif line.startswith("type ") and current_interface:
+            current_interface["mode"] = line.split(" ", 1)[1].strip()
+
+    if current_interface:
+        interfaces.append(current_interface)
+
+    if not interfaces:
+        return {
+            "available": False,
+            "state": "not_detected",
+            "interfaces": [],
+            "message": "No wireless adapter is currently detected.",
+        }
+
+    return {
+        "available": True,
+        "state": "idle",
+        "interfaces": interfaces,
+        "message": f"{len(interfaces)} wireless interface(s) detected.",
+    }
+
+
+
+def _run_scanner_service_command(
+    arguments: list[str],
+    timeout: int = 50,
+) -> tuple[int, str, str]:
+    """Run one narrowly permitted systemctl command through sudo."""
+    try:
+        result = subprocess.run(
+            [
+                "sudo",
+                "-n",
+                SYSTEMCTL_PATH,
+                *arguments,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired) as command_error:
+        return -1, "", str(command_error)
+
+    return (
+        result.returncode,
+        result.stdout.strip(),
+        result.stderr.strip(),
+    )
+
+
+def _read_scanner_service_state() -> tuple[str, str]:
+    """Return the current systemd service state and any error details."""
+    return_code, output, error = _run_scanner_service_command(
+        ["is-active", SCANNER_SERVICE_NAME],
+        timeout=10,
+    )
+
+    service_state = output.strip().lower()
+
+    if return_code == 0:
+        return service_state or "active", ""
+
+    if service_state in {
+        "inactive",
+        "failed",
+        "activating",
+        "deactivating",
+    }:
+        return service_state, error
+
+    return (
+        "error",
+        error
+        or output
+        or "Unable to read the NetShield scanner service state.",
+    )
+
+
+def _read_scanner_service_pid() -> int | None:
+    """Return the scanner service MainPID when one is available."""
+    return_code, output, _error = _run_scanner_service_command(
+        [
+            "show",
+            SCANNER_SERVICE_NAME,
+            "--property=MainPID",
+            "--value",
+        ],
+        timeout=10,
+    )
+
+    if return_code != 0:
+        return None
+
+    try:
+        process_id = int(output)
+    except (TypeError, ValueError):
+        return None
+
+    return process_id if process_id > 0 else None
+
+
+def read_scanner_status() -> dict:
+    """Return protected scanner-service and adapter status."""
+    service_state, service_error = _read_scanner_service_state()
+
+    state_mapping = {
+        "active": "running",
+        "activating": "starting",
+        "deactivating": "stopping",
+        "inactive": "idle",
+        "failed": "error",
+        "error": "error",
+    }
+
+    scanner_state = state_mapping.get(service_state, "error")
+    running = scanner_state in {
+        "starting",
+        "running",
+        "stopping",
+    }
+
+    messages = {
+        "starting": (
+            f"Starting scanner on {SCANNER_SERVICE_INTERFACE}."
+        ),
+        "running": (
+            f"Scanning on {SCANNER_SERVICE_INTERFACE}."
+        ),
+        "stopping": "Stopping scanner safely.",
+        "idle": "Scanner is idle.",
+        "error": (
+            "The scanner service encountered an error."
+        ),
+    }
+
+    return {
+        "state": scanner_state,
+        "running": running,
+        "interface": (
+            SCANNER_SERVICE_INTERFACE if running else None
+        ),
+        "pid": (
+            _read_scanner_service_pid() if running else None
+        ),
+        "started_at": None,
+        "stopped_at": None,
+        "last_error": service_error,
+        "message": messages[scanner_state],
+        "adapter": read_adapter_status(),
+    }
+
+
+def start_scanner_process(
+    interface: str | None = None,
+) -> tuple[dict, int]:
+    """Start the protected NetShield scanner service."""
+    adapter = read_adapter_status()
+
+    if not adapter["available"]:
+        return {
+            "ok": False,
+            "state": "not_detected",
+            "message": adapter["message"],
+        }, 409
+
+    interface_names = [
+        item["name"]
+        for item in adapter["interfaces"]
+    ]
+
+    selected_interface = interface or interface_names[0]
+
+    if selected_interface not in interface_names:
+        return {
+            "ok": False,
+            "state": "invalid_interface",
+            "message": (
+                f"Wireless interface '{selected_interface}' "
+                "is not currently available."
+            ),
+        }, 400
+
+    if selected_interface != SCANNER_SERVICE_INTERFACE:
+        return {
+            "ok": False,
+            "state": "interface_not_configured",
+            "message": (
+                "The protected scanner service is configured for "
+                f"{SCANNER_SERVICE_INTERFACE}, not "
+                f"{selected_interface}."
+            ),
+        }, 409
+
+    current_status = read_scanner_status()
+
+    if current_status["running"]:
+        return {
+            "ok": False,
+            "state": current_status["state"],
+            "message": "The scanner is already running.",
+            "scanner": current_status,
+        }, 409
+
+    return_code, output, error = _run_scanner_service_command(
+        ["start", SCANNER_SERVICE_NAME],
+    )
+
+    if return_code != 0:
+        return {
+            "ok": False,
+            "state": "error",
+            "message": (
+                error
+                or output
+                or "Unable to start the scanner service."
+            ),
+        }, 500
+
+    scanner_status = read_scanner_status()
+
+    return {
+        "ok": True,
+        "scanner": scanner_status,
+    }, 202
+
+
+def stop_scanner_process() -> tuple[dict, int]:
+    """Stop the protected scanner service safely."""
+    current_status = read_scanner_status()
+
+    if not current_status["running"]:
+        current_status["state"] = "idle"
+        current_status["message"] = "Scanner is already stopped."
+
+        return {
+            "ok": True,
+            "scanner": current_status,
+        }, 200
+
+    return_code, output, error = _run_scanner_service_command(
+        ["stop", SCANNER_SERVICE_NAME],
+    )
+
+    if return_code != 0:
+        return {
+            "ok": False,
+            "state": "error",
+            "message": (
+                error
+                or output
+                or "Unable to stop the scanner service."
+            ),
+        }, 500
+
+    scanner_status = read_scanner_status()
+    scanner_status["message"] = (
+        "Scanner stopped. Latest CSV results were preserved."
+    )
+
+    return {
+        "ok": True,
+        "scanner": scanner_status,
+    }, 200
+
+
 @app.get("/api/health")
 def health():
     return jsonify(
@@ -572,5 +901,30 @@ def history():
     return jsonify(read_history())
 
 
+@app.get("/api/adapter/status")
+def adapter_status():
+    return jsonify(read_adapter_status())
+
+
+@app.get("/api/scanner/status")
+def scanner_status():
+    return jsonify(read_scanner_status())
+
+
+@app.post("/api/scanner/start")
+def scanner_start():
+    request_data = request.get_json(silent=True) or {}
+    response, status_code = start_scanner_process(
+        request_data.get("interface")
+    )
+    return jsonify(response), status_code
+
+
+@app.post("/api/scanner/stop")
+def scanner_stop():
+    response, status_code = stop_scanner_process()
+    return jsonify(response), status_code
+
+
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5000, debug=True)
+    app.run(host="127.0.0.1", port=5000, debug=True, use_reloader=False)

@@ -94,6 +94,31 @@ def _verify_monitor_mode(interface: str) -> None:
         raise RuntimeError(f"Interface {interface} is not in monitor mode.")
 
 
+def restore_managed_mode(interface: str) -> None:
+    """Disable monitor mode and restart normal WiFi services."""
+    result = _run_command(
+        ["airmon-ng", "stop", interface],
+        check=False,
+    )
+
+    if result.returncode != 0:
+        details = result.stderr.strip() or result.stdout.strip()
+        print(
+            f"Warning: could not restore {interface}: {details}",
+            file=sys.stderr,
+        )
+
+    # airmon-ng check kill may stop these normal WiFi services.
+    _run_command(
+        ["systemctl", "start", "NetworkManager"],
+        check=False,
+    )
+    _run_command(
+        ["systemctl", "start", "wpa_supplicant"],
+        check=False,
+    )
+
+
 def scan_networks(interface: str, duration: int = SCAN_INTERVAL_SECONDS) -> dict[str, dict[str, str | int | None]]:
     """Scan WiFi channels one by one and return discovered access points."""
 
@@ -204,6 +229,8 @@ def main() -> int:
     args = _parse_args()
     known_networks: dict[str, dict[str, str | int | None]] = {}
     stop_requested = False
+    monitor_interface: str | None = None
+    monitor_mode_created = False
 
     def request_stop(_signum: int, _frame: Any) -> None:
         nonlocal stop_requested
@@ -214,17 +241,29 @@ def main() -> int:
 
     try:
         conf.verb = 0
-        monitor_interface = args.interface if args.no_monitor_setup else enable_monitor_mode(args.interface)
+
+        if args.no_monitor_setup:
+            monitor_interface = args.interface
+        else:
+            monitor_interface = enable_monitor_mode(args.interface)
+            monitor_mode_created = True
+
         print(f"Scanning on monitor interface: {monitor_interface}")
 
         while not stop_requested:
-            latest_networks = scan_networks(monitor_interface, SCAN_INTERVAL_SECONDS)
+            latest_networks = scan_networks(
+                monitor_interface,
+                SCAN_INTERVAL_SECONDS,
+            )
             _merge_networks(known_networks, latest_networks)
             save_to_csv(known_networks, args.output)
             _print_table(known_networks)
 
     except PermissionError:
-        print("Permission denied. Run this scanner with sudo/root privileges.", file=sys.stderr)
+        print(
+            "Permission denied. Run this scanner with sudo/root privileges.",
+            file=sys.stderr,
+        )
         return 1
     except RuntimeError as exc:
         print(f"Error: {exc}", file=sys.stderr)
@@ -232,6 +271,12 @@ def main() -> int:
     except Exception as exc:
         print(f"Unexpected error: {exc}", file=sys.stderr)
         return 1
+    finally:
+        if monitor_mode_created and monitor_interface:
+            print(
+                f"Restoring {monitor_interface} to managed mode..."
+            )
+            restore_managed_mode(monitor_interface)
 
     print("\nScanner stopped. Latest CSV saved successfully.")
     return 0

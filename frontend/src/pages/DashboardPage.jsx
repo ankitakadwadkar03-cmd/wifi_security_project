@@ -4,13 +4,68 @@ import StatusBadge from "../components/StatusBadge";
 const API_BASE_URL =
   import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:5000";
 
+const EMPTY_SCANNER_STATUS = {
+  state: "idle",
+  running: false,
+  interface: null,
+  message: "Checking scanner status...",
+  adapter: {
+    available: false,
+    interfaces: [],
+    message: "Checking wireless adapter...",
+  },
+};
+
 export default function DashboardPage({ setCurrentPage }) {
   const [networks, setNetworks] = useState([]);
   const [threats, setThreats] = useState([]);
   const [latestHistory, setLatestHistory] = useState(null);
   const [backendStatus, setBackendStatus] = useState("Checking");
+  const [scannerStatus, setScannerStatus] = useState(EMPTY_SCANNER_STATUS);
+  const [selectedInterface, setSelectedInterface] = useState("");
+  const [scannerActionLoading, setScannerActionLoading] = useState(false);
+  const [scannerMessage, setScannerMessage] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+
+  async function loadScannerStatus() {
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/api/scanner/status`
+      );
+
+      if (!response.ok) {
+        throw new Error(`Scanner status returned HTTP ${response.status}`);
+      }
+
+      const data = await response.json();
+      setScannerStatus(data);
+
+      const interfaces = Array.isArray(data.adapter?.interfaces)
+        ? data.adapter.interfaces
+        : [];
+
+      setSelectedInterface((currentInterface) => {
+        const currentStillExists = interfaces.some(
+          (item) => item.name === currentInterface
+        );
+
+        if (currentStillExists) {
+          return currentInterface;
+        }
+
+        return interfaces[0]?.name || "";
+      });
+    } catch (statusError) {
+      console.error("Scanner status error:", statusError);
+
+      setScannerStatus({
+        ...EMPTY_SCANNER_STATUS,
+        state: "error",
+        message: "Unable to read scanner status.",
+      });
+    }
+  }
 
   useEffect(() => {
     const controller = new AbortController();
@@ -85,9 +140,67 @@ export default function DashboardPage({ setCurrentPage }) {
     }
 
     loadDashboard();
+    loadScannerStatus();
 
-    return () => controller.abort();
+    const pollingTimer = window.setInterval(
+      loadScannerStatus,
+      2000
+    );
+
+    return () => {
+      controller.abort();
+      window.clearInterval(pollingTimer);
+    };
   }, []);
+
+  async function runScannerAction(action) {
+    try {
+      setScannerActionLoading(true);
+      setScannerMessage("");
+
+      const requestOptions = {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+      };
+
+      if (action === "start") {
+        requestOptions.body = JSON.stringify({
+          interface: selectedInterface || null,
+        });
+      }
+
+      const response = await fetch(
+        `${API_BASE_URL}/api/scanner/${action}`,
+        requestOptions
+      );
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          data.message ||
+            data.scanner?.message ||
+            `Unable to ${action} scanner.`
+        );
+      }
+
+      setScannerMessage(
+        data.scanner?.message ||
+          data.message ||
+          `Scanner ${action} request completed.`
+      );
+
+      await loadScannerStatus();
+    } catch (actionError) {
+      console.error(`Scanner ${action} error:`, actionError);
+      setScannerMessage(actionError.message);
+      await loadScannerStatus();
+    } finally {
+      setScannerActionLoading(false);
+    }
+  }
 
   const recentNetworks = networks.slice(0, 5);
   const latestThreat = threats[0];
@@ -97,6 +210,21 @@ export default function DashboardPage({ setCurrentPage }) {
         latestHistory.average_security_score
       ).toFixed(0)}%`
     : "—";
+
+  const adapter = scannerStatus.adapter || EMPTY_SCANNER_STATUS.adapter;
+  const interfaces = Array.isArray(adapter.interfaces)
+    ? adapter.interfaces
+    : [];
+
+  const scannerRunning = Boolean(scannerStatus.running);
+  const canStart =
+    adapter.available &&
+    selectedInterface &&
+    !scannerRunning &&
+    !scannerActionLoading;
+
+  const canStop =
+    scannerRunning && !scannerActionLoading;
 
   return (
     <section className="appPage dashboardPage">
@@ -111,7 +239,7 @@ export default function DashboardPage({ setCurrentPage }) {
 
       <div className="metricGrid">
         <div className="metricCard">
-          <span>Backend Scanner</span>
+          <span>Backend API</span>
           <strong>{backendStatus}</strong>
           <p>
             {backendStatus === "Active"
@@ -141,6 +269,101 @@ export default function DashboardPage({ setCurrentPage }) {
           <strong>{loading ? "..." : securityScore}</strong>
           <p>Latest saved historical analysis score</p>
         </div>
+      </div>
+
+      <div className="scannerControlPanel">
+        <div className="scannerControlHeader">
+          <div>
+            <span>Wireless Scanner Control</span>
+            <h2>Start or stop real-time WiFi scanning</h2>
+          </div>
+
+          <div
+            className={`scannerStateBadge scanner-${scannerStatus.state}`}
+          >
+            {scannerStatus.state.replaceAll("_", " ")}
+          </div>
+        </div>
+
+        <div className="scannerControlGrid">
+          <div className="scannerInfoItem">
+            <span>Adapter Status</span>
+            <strong>
+              {adapter.available ? "Detected" : "Not Detected"}
+            </strong>
+            <p>{adapter.message}</p>
+          </div>
+
+          <div className="scannerInfoItem">
+            <span>Wireless Interface</span>
+
+            {interfaces.length > 0 ? (
+              <select
+                value={selectedInterface}
+                disabled={scannerRunning}
+                onChange={(event) =>
+                  setSelectedInterface(event.target.value)
+                }
+              >
+                {interfaces.map((item) => (
+                  <option key={item.name} value={item.name}>
+                    {item.name} — {item.mode}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <strong>Unavailable</strong>
+            )}
+
+            <p>
+              {scannerStatus.interface
+                ? `Scanner interface: ${scannerStatus.interface}`
+                : adapter.available
+                  ? "Wireless interface is ready for scanning."
+                  : "Connect a compatible USB WiFi adapter."}
+            </p>
+          </div>
+
+          <div className="scannerInfoItem">
+            <span>Scanner Process</span>
+            <strong>
+              {scannerStatus.pid
+                ? `PID ${scannerStatus.pid}`
+                : "No active process"}
+            </strong>
+            <p>{scannerStatus.message}</p>
+          </div>
+        </div>
+
+        <div className="scannerActions">
+          <button
+            type="button"
+            className="startScanButton"
+            disabled={!canStart}
+            onClick={() => runScannerAction("start")}
+          >
+            {scannerActionLoading && !scannerRunning
+              ? "Starting..."
+              : "Start Scan"}
+          </button>
+
+          <button
+            type="button"
+            className="stopScanButton"
+            disabled={!canStop}
+            onClick={() => runScannerAction("stop")}
+          >
+            {scannerActionLoading && scannerRunning
+              ? "Stopping..."
+              : "Stop Scan"}
+          </button>
+        </div>
+
+        {scannerMessage && (
+          <p className="scannerActionMessage">
+            {scannerMessage}
+          </p>
+        )}
       </div>
 
       {error && (
@@ -206,7 +429,6 @@ export default function DashboardPage({ setCurrentPage }) {
           {latestThreat ? (
             <>
               <StatusBadge value={latestThreat.severity} />
-
               <h3>{latestThreat.title}</h3>
 
               <p>
@@ -223,7 +445,6 @@ export default function DashboardPage({ setCurrentPage }) {
           ) : (
             <>
               <StatusBadge value="Safe" />
-
               <h3>No potential findings</h3>
 
               <p>
