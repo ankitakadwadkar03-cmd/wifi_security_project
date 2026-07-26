@@ -461,3 +461,53 @@ Example Start Scan request:
 ## Ethical Use
 
 Use NetShield only on wireless networks and environments that you own or have explicit permission to assess. Automated findings are investigation indicators and are not final proof of an attack.
+
+## Protected Packet-Capture Service
+
+NetShield provides protected Flask API controls for live WiFi packet capture.
+
+The root-required capture operation runs through `netshield-capture.service`. The WiFi scanner uses `netshield-scanner.service`.
+
+Only one service can use the USB WiFi adapter at a time. NetShield blocks scanning while packet capture is active and blocks packet capture while scanning is active.
+
+### Install the packet-capture service
+
+From the project root:
+
+```bash
+chmod +x deployment/install_capture_service.sh
+./deployment/install_capture_service.sh
+```
+
+The installer:
+
+- Copies packet-capture files into `/opt/netshield-capture/`.
+- Creates a dedicated Python environment.
+- Installs Scapy.
+- Creates the protected systemd service.
+- Adds restricted passwordless control for that service only.
+- Does not enable packet capture automatically at startup.
+
+### Packet-Capture API Routes
+
+```text
+GET  /api/capture/status
+POST /api/capture/start
+POST /api/capture/stop
+```
+
+Example start request:
+
+```json
+{
+  "interface": "wlan0"
+}
+```
+
+When capture starts, `wlan0` temporarily becomes `wlan0mon` in monitor mode. When capture stops, NetShield preserves the CSV log and restores the adapter to `wlan0` managed mode.
+
+Packet logs are stored at `packet_logs/wifi_packets.csv`.
+
+A start request returns `409 CONFLICT` when the other wireless service is already running.
+
+Use packet capture only on networks and wireless environments that you own or have explicit permission to assess.

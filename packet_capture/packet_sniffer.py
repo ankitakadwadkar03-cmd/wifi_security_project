@@ -7,7 +7,9 @@ Run:
 from __future__ import annotations
 
 import argparse
+import shutil
 import signal
+import subprocess
 import sys
 from collections import deque
 from pathlib import Path
@@ -21,6 +23,147 @@ from packet_logger import PacketCSVLogger
 
 DEFAULT_OUTPUT = Path("packet_logs/wifi_packets.csv")
 MAX_VISIBLE_ROWS = 20
+
+
+def _run_command(
+    command: list[str],
+    check: bool = True,
+    timeout: int | None = None,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        command,
+        check=check,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=timeout,
+    )
+
+
+def _require_command(command_name: str) -> None:
+    if shutil.which(command_name) is None:
+        raise RuntimeError(
+            f"Required command not found: {command_name}"
+        )
+
+
+def _interface_exists(interface: str) -> bool:
+    try:
+        _run_command(["iwconfig", interface])
+        return True
+    except subprocess.CalledProcessError:
+        return False
+
+
+def _parse_monitor_interface(
+    airmon_output: str,
+    interface: str,
+) -> str:
+    for line in airmon_output.splitlines():
+        lowered_line = line.lower()
+
+        if "monitor mode" in lowered_line and "enabled" in lowered_line:
+            tokens = (
+                line.replace(")", " ")
+                .replace("(", " ")
+                .split()
+            )
+
+            for token in reversed(tokens):
+                if token.startswith(interface) and token != interface:
+                    return token
+
+    candidate = f"{interface}mon"
+
+    if _interface_exists(candidate):
+        return candidate
+
+    return interface
+
+
+def _verify_monitor_mode(interface: str) -> None:
+    try:
+        result = _run_command(["iwconfig", interface])
+    except subprocess.CalledProcessError as command_error:
+        raise RuntimeError(
+            f"Could not verify interface {interface}: "
+            f"{command_error.stderr.strip()}"
+        ) from command_error
+
+    normalized_output = result.stdout.lower().replace(" ", "")
+
+    if "mode:monitor" not in normalized_output:
+        raise RuntimeError(
+            f"Interface {interface} is not in monitor mode."
+        )
+
+
+def enable_monitor_mode(interface: str) -> str:
+    """Enable monitor mode and return the monitor interface name."""
+    for command_name in ("iwconfig", "airmon-ng"):
+        _require_command(command_name)
+
+    _run_command(
+        ["airmon-ng", "check", "kill"],
+        check=False,
+    )
+
+    try:
+        result = _run_command(
+            ["airmon-ng", "start", interface]
+        )
+    except subprocess.CalledProcessError as command_error:
+        details = (
+            command_error.stderr.strip()
+            or command_error.stdout.strip()
+        )
+
+        raise RuntimeError(
+            f"Could not enable monitor mode for {interface}: {details}"
+        ) from command_error
+
+    monitor_interface = _parse_monitor_interface(
+        result.stdout,
+        interface,
+    )
+    _verify_monitor_mode(monitor_interface)
+
+    return monitor_interface
+
+
+def restore_managed_mode(interface: str) -> None:
+    """Disable monitor mode and restart normal WiFi services."""
+    try:
+        result = _run_command(
+            ["airmon-ng", "stop", interface],
+            check=False,
+            timeout=15,
+        )
+    except subprocess.TimeoutExpired:
+        print(
+            f"Warning: restoring {interface} timed out after 15 seconds.",
+            file=sys.stderr,
+        )
+    else:
+        if result.returncode != 0:
+            details = result.stderr.strip() or result.stdout.strip()
+            print(
+                f"Warning: could not restore {interface}: {details}",
+                file=sys.stderr,
+            )
+
+    for service_name in ("NetworkManager", "wpa_supplicant"):
+        try:
+            _run_command(
+                ["systemctl", "start", service_name],
+                check=False,
+                timeout=10,
+            )
+        except subprocess.TimeoutExpired:
+            print(
+                f"Warning: starting {service_name} timed out.",
+                file=sys.stderr,
+            )
 
 
 class LivePacketMonitor:
@@ -45,13 +188,18 @@ class LivePacketMonitor:
         self.recent_packets: Deque[PacketAnalysis] = deque(maxlen=MAX_VISIBLE_ROWS)
 
     def start(self) -> None:
-        print(f"Starting live packet capture on {self.interface}. Press Ctrl+C to stop.")
-        sniff(
-            iface=self.interface,
-            prn=self._handle_packet,
-            store=False,
-            stop_filter=lambda _packet: self.stop_requested,
+        print(
+            f"Starting live packet capture on {self.interface}. "
+            "Press Ctrl+C to stop."
         )
+
+        while not self.stop_requested:
+            sniff(
+                iface=self.interface,
+                prn=self._handle_packet,
+                store=False,
+                timeout=1,
+            )
 
     def request_stop(self, _signum: int, _frame: Any) -> None:
         self.stop_requested = True
@@ -105,12 +253,17 @@ class LivePacketMonitor:
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Live 802.11 packet sniffer for Kali Linux")
+    parser = argparse.ArgumentParser(
+        description="Live 802.11 packet sniffer for Kali Linux"
+    )
     parser.add_argument(
         "-i",
         "--interface",
         required=True,
-        help="Monitor-mode interface, for example wlan0mon.",
+        help=(
+            "Wireless interface, for example wlan0. "
+            "Monitor mode is enabled automatically."
+        ),
     )
     parser.add_argument(
         "-o",
@@ -122,13 +275,19 @@ def _parse_args() -> argparse.Namespace:
         "--deauth-threshold",
         type=int,
         default=10,
-        help="Number of deauthentication frames in the time window before raising an alert.",
+        help=(
+            "Number of deauthentication frames in the time window "
+            "before raising an alert."
+        ),
     )
     parser.add_argument(
         "--unknown-mac-threshold",
         type=int,
         default=50,
-        help="Packets from a non-BSSID source in the time window before raising an alert.",
+        help=(
+            "Packets from a non-BSSID source in the time window "
+            "before raising an alert."
+        ),
     )
     parser.add_argument(
         "--window-seconds",
@@ -136,16 +295,31 @@ def _parse_args() -> argparse.Namespace:
         default=30,
         help="Detection time window in seconds.",
     )
+    parser.add_argument(
+        "--no-monitor-setup",
+        action="store_true",
+        help=(
+            "Skip monitor-mode setup when the provided interface "
+            "is already in monitor mode."
+        ),
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = _parse_args()
+    monitor_interface = args.interface
+    monitor_mode_created = False
 
     try:
         conf.verb = 0
+
+        if not args.no_monitor_setup:
+            monitor_interface = enable_monitor_mode(args.interface)
+            monitor_mode_created = True
+
         monitor = LivePacketMonitor(
-            interface=args.interface,
+            interface=monitor_interface,
             output_path=args.output,
             deauth_threshold=args.deauth_threshold,
             unknown_mac_threshold=args.unknown_mac_threshold,
@@ -155,7 +329,13 @@ def main() -> int:
         signal.signal(signal.SIGTERM, monitor.request_stop)
         monitor.start()
     except PermissionError:
-        print("Permission denied. Run with sudo/root privileges.", file=sys.stderr)
+        print(
+            "Permission denied. Run with sudo/root privileges.",
+            file=sys.stderr,
+        )
+        return 1
+    except RuntimeError as exc:
+        print(f"Monitor-mode error: {exc}", file=sys.stderr)
         return 1
     except OSError as exc:
         print(f"Interface error: {exc}", file=sys.stderr)
@@ -163,6 +343,12 @@ def main() -> int:
     except Exception as exc:
         print(f"Unexpected error: {exc}", file=sys.stderr)
         return 1
+    finally:
+        if monitor_mode_created:
+            print(
+                f"Restoring {monitor_interface} to managed mode..."
+            )
+            restore_managed_mode(monitor_interface)
 
     print("\nPacket capture stopped. CSV log saved.")
     return 0

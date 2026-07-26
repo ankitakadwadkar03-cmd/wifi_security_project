@@ -10,6 +10,7 @@ SCANNER_APP_DIR="${SCANNER_INSTALL_ROOT}/app"
 SCANNER_VENV_DIR="${SCANNER_INSTALL_ROOT}/venv"
 
 SERVICE_NAME="netshield-scanner.service"
+CAPTURE_SERVICE_NAME="netshield-capture.service"
 SERVICE_PATH="/etc/systemd/system/${SERVICE_NAME}"
 SUDOERS_PATH="/etc/sudoers.d/netshield-scanner"
 
@@ -60,6 +61,10 @@ ConditionPathExists=${SCANNER_APP_DIR}/wifi_scanner.py
 Type=simple
 WorkingDirectory=${SCANNER_APP_DIR}
 Environment=PYTHONUNBUFFERED=1
+
+# Prevent scanning from starting while packet capture is active.
+ExecStartPre=/bin/sh -c '! /usr/bin/systemctl is-active --quiet ${CAPTURE_SERVICE_NAME}'
+
 ExecStart=${SCANNER_VENV_DIR}/bin/python ${SCANNER_APP_DIR}/wifi_scanner.py --interface wlan0 --output ${OUTPUT_FILE}
 KillSignal=SIGTERM
 TimeoutStopSec=40
