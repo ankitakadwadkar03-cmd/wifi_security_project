@@ -16,15 +16,32 @@ const EMPTY_SCANNER_STATUS = {
   },
 };
 
+const EMPTY_CAPTURE_STATUS = {
+  state: "idle",
+  running: false,
+  interface: null,
+  pid: null,
+  message: "Checking packet-capture status...",
+  packet_log_found: false,
+  adapter: {
+    available: false,
+    interfaces: [],
+    message: "Checking wireless adapter...",
+  },
+};
+
 export default function DashboardPage({ setCurrentPage }) {
   const [networks, setNetworks] = useState([]);
   const [threats, setThreats] = useState([]);
   const [latestHistory, setLatestHistory] = useState(null);
   const [backendStatus, setBackendStatus] = useState("Checking");
   const [scannerStatus, setScannerStatus] = useState(EMPTY_SCANNER_STATUS);
+  const [captureStatus, setCaptureStatus] = useState(EMPTY_CAPTURE_STATUS);
   const [selectedInterface, setSelectedInterface] = useState("");
   const [scannerActionLoading, setScannerActionLoading] = useState(false);
   const [scannerMessage, setScannerMessage] = useState("");
+  const [captureActionLoading, setCaptureActionLoading] = useState(false);
+  const [captureMessage, setCaptureMessage] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
@@ -63,6 +80,31 @@ export default function DashboardPage({ setCurrentPage }) {
         ...EMPTY_SCANNER_STATUS,
         state: "error",
         message: "Unable to read scanner status.",
+      });
+    }
+  }
+
+  async function loadCaptureStatus() {
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/api/capture/status`
+      );
+
+      if (!response.ok) {
+        throw new Error(
+          `Capture status returned HTTP ${response.status}`
+        );
+      }
+
+      const data = await response.json();
+      setCaptureStatus(data);
+    } catch (statusError) {
+      console.error("Packet-capture status error:", statusError);
+
+      setCaptureStatus({
+        ...EMPTY_CAPTURE_STATUS,
+        state: "error",
+        message: "Unable to read packet-capture status.",
       });
     }
   }
@@ -141,11 +183,12 @@ export default function DashboardPage({ setCurrentPage }) {
 
     loadDashboard();
     loadScannerStatus();
+    loadCaptureStatus();
 
-    const pollingTimer = window.setInterval(
-      loadScannerStatus,
-      2000
-    );
+    const pollingTimer = window.setInterval(() => {
+      loadScannerStatus();
+      loadCaptureStatus();
+    }, 2000);
 
     return () => {
       controller.abort();
@@ -202,6 +245,66 @@ export default function DashboardPage({ setCurrentPage }) {
     }
   }
 
+  async function runCaptureAction(action) {
+    try {
+      setCaptureActionLoading(true);
+      setCaptureMessage("");
+
+      const requestOptions = {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+      };
+
+      if (action === "start") {
+        requestOptions.body = JSON.stringify({
+          interface: selectedInterface || null,
+        });
+      }
+
+      const response = await fetch(
+        `${API_BASE_URL}/api/capture/${action}`,
+        requestOptions
+      );
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          data.message ||
+            data.capture?.message ||
+            `Unable to ${action} packet capture.`
+        );
+      }
+
+      setCaptureMessage(
+        data.capture?.message ||
+          data.message ||
+          `Packet-capture ${action} request completed.`
+      );
+
+      await Promise.all([
+        loadCaptureStatus(),
+        loadScannerStatus(),
+      ]);
+    } catch (actionError) {
+      console.error(
+        `Packet-capture ${action} error:`,
+        actionError
+      );
+
+      setCaptureMessage(actionError.message);
+
+      await Promise.all([
+        loadCaptureStatus(),
+        loadScannerStatus(),
+      ]);
+    } finally {
+      setCaptureActionLoading(false);
+    }
+  }
+
   const recentNetworks = networks.slice(0, 5);
   const latestThreat = threats[0];
 
@@ -217,14 +320,33 @@ export default function DashboardPage({ setCurrentPage }) {
     : [];
 
   const scannerRunning = Boolean(scannerStatus.running);
-  const canStart =
+  const captureRunning = Boolean(captureStatus.running);
+
+  const canStartScanner =
     adapter.available &&
     selectedInterface &&
     !scannerRunning &&
+    !captureRunning &&
+    !scannerActionLoading &&
+    !captureActionLoading;
+
+  const canStopScanner =
+    scannerRunning &&
+    !scannerActionLoading &&
+    !captureActionLoading;
+
+  const canStartCapture =
+    adapter.available &&
+    selectedInterface &&
+    !captureRunning &&
+    !scannerRunning &&
+    !captureActionLoading &&
     !scannerActionLoading;
 
-  const canStop =
-    scannerRunning && !scannerActionLoading;
+  const canStopCapture =
+    captureRunning &&
+    !captureActionLoading &&
+    !scannerActionLoading;
 
   return (
     <section className="appPage dashboardPage">
@@ -300,7 +422,7 @@ export default function DashboardPage({ setCurrentPage }) {
             {interfaces.length > 0 ? (
               <select
                 value={selectedInterface}
-                disabled={scannerRunning}
+                disabled={scannerRunning || captureRunning}
                 onChange={(event) =>
                   setSelectedInterface(event.target.value)
                 }
@@ -339,7 +461,7 @@ export default function DashboardPage({ setCurrentPage }) {
           <button
             type="button"
             className="startScanButton"
-            disabled={!canStart}
+            disabled={!canStartScanner}
             onClick={() => runScannerAction("start")}
           >
             {scannerActionLoading && !scannerRunning
@@ -350,7 +472,7 @@ export default function DashboardPage({ setCurrentPage }) {
           <button
             type="button"
             className="stopScanButton"
-            disabled={!canStop}
+            disabled={!canStopScanner}
             onClick={() => runScannerAction("stop")}
           >
             {scannerActionLoading && scannerRunning
@@ -362,6 +484,89 @@ export default function DashboardPage({ setCurrentPage }) {
         {scannerMessage && (
           <p className="scannerActionMessage">
             {scannerMessage}
+          </p>
+        )}
+      </div>
+
+      <div className="scannerControlPanel captureControlPanel">
+        <div className="scannerControlHeader">
+          <div>
+            <span>Live Packet Capture</span>
+            <h2>Capture and analyze authorized WiFi traffic</h2>
+          </div>
+
+          <div
+            className={`scannerStateBadge scanner-${captureStatus.state}`}
+          >
+            {captureStatus.state.replaceAll("_", " ")}
+          </div>
+        </div>
+
+        <div className="scannerControlGrid">
+          <div className="scannerInfoItem">
+            <span>Capture Interface</span>
+            <strong>
+              {captureStatus.adapter?.interfaces?.[0]
+                ? `${captureStatus.adapter.interfaces[0].name} — ${captureStatus.adapter.interfaces[0].mode}`
+                : selectedInterface || "Unavailable"}
+            </strong>
+            <p>
+              {captureRunning
+                ? "The adapter is operating in monitor mode."
+                : scannerRunning
+                  ? "The adapter is currently reserved by the WiFi scanner."
+                  : "The selected managed interface is ready."}
+            </p>
+          </div>
+
+          <div className="scannerInfoItem">
+            <span>Capture Process</span>
+            <strong>
+              {captureStatus.pid
+                ? `PID ${captureStatus.pid}`
+                : "No active process"}
+            </strong>
+            <p>{captureStatus.message}</p>
+          </div>
+
+          <div className="scannerInfoItem">
+            <span>Packet Log</span>
+            <strong>
+              {captureStatus.packet_log_found
+                ? "CSV Available"
+                : "No Capture Yet"}
+            </strong>
+            <p>Saved to packet_logs/wifi_packets.csv</p>
+          </div>
+        </div>
+
+        <div className="scannerActions">
+          <button
+            type="button"
+            className="startScanButton"
+            disabled={!canStartCapture}
+            onClick={() => runCaptureAction("start")}
+          >
+            {captureActionLoading && !captureRunning
+              ? "Starting..."
+              : "Start Capture"}
+          </button>
+
+          <button
+            type="button"
+            className="stopScanButton"
+            disabled={!canStopCapture}
+            onClick={() => runCaptureAction("stop")}
+          >
+            {captureActionLoading && captureRunning
+              ? "Stopping..."
+              : "Stop Capture"}
+          </button>
+        </div>
+
+        {captureMessage && (
+          <p className="scannerActionMessage">
+            {captureMessage}
           </p>
         )}
       </div>
