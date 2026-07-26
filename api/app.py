@@ -41,6 +41,9 @@ ALLOWED_REPORT_EXTENSIONS = {".csv", ".json", ".txt", ".log"}
 SYSTEMCTL_PATH = "/usr/bin/systemctl"
 SCANNER_SERVICE_NAME = "netshield-scanner.service"
 SCANNER_SERVICE_INTERFACE = "wlan0"
+CAPTURE_SERVICE_NAME = "netshield-capture.service"
+CAPTURE_SERVICE_INTERFACE = "wlan0"
+PACKET_LOG_CSV = PROJECT_ROOT / "packet_logs" / "wifi_packets.csv"
 
 
 def _normalize_bssid(value: str | None) -> str:
@@ -555,7 +558,7 @@ def read_adapter_status() -> dict:
 
 
 
-def _run_scanner_service_command(
+def _run_service_command(
     arguments: list[str],
     timeout: int = 50,
 ) -> tuple[int, str, str]:
@@ -585,7 +588,7 @@ def _run_scanner_service_command(
 
 def _read_scanner_service_state() -> tuple[str, str]:
     """Return the current systemd service state and any error details."""
-    return_code, output, error = _run_scanner_service_command(
+    return_code, output, error = _run_service_command(
         ["is-active", SCANNER_SERVICE_NAME],
         timeout=10,
     )
@@ -613,7 +616,7 @@ def _read_scanner_service_state() -> tuple[str, str]:
 
 def _read_scanner_service_pid() -> int | None:
     """Return the scanner service MainPID when one is available."""
-    return_code, output, _error = _run_scanner_service_command(
+    return_code, output, _error = _run_service_command(
         [
             "show",
             SCANNER_SERVICE_NAME,
@@ -689,6 +692,18 @@ def start_scanner_process(
     interface: str | None = None,
 ) -> tuple[dict, int]:
     """Start the protected NetShield scanner service."""
+    capture_status = read_capture_status()
+
+    if capture_status["running"]:
+        return {
+            "ok": False,
+            "state": "service_conflict",
+            "message": (
+                "Stop packet capture before starting WiFi scanning."
+            ),
+            "capture": capture_status,
+        }, 409
+
     adapter = read_adapter_status()
 
     if not adapter["available"]:
@@ -736,7 +751,7 @@ def start_scanner_process(
             "scanner": current_status,
         }, 409
 
-    return_code, output, error = _run_scanner_service_command(
+    return_code, output, error = _run_service_command(
         ["start", SCANNER_SERVICE_NAME],
     )
 
@@ -772,7 +787,7 @@ def stop_scanner_process() -> tuple[dict, int]:
             "scanner": current_status,
         }, 200
 
-    return_code, output, error = _run_scanner_service_command(
+    return_code, output, error = _run_service_command(
         ["stop", SCANNER_SERVICE_NAME],
     )
 
@@ -795,6 +810,233 @@ def stop_scanner_process() -> tuple[dict, int]:
     return {
         "ok": True,
         "scanner": scanner_status,
+    }, 200
+
+
+def _read_capture_service_state() -> tuple[str, str]:
+    """Return the packet-capture systemd service state."""
+    return_code, output, error = _run_service_command(
+        ["is-active", CAPTURE_SERVICE_NAME],
+        timeout=10,
+    )
+
+    service_state = output.strip().lower()
+
+    if return_code == 0:
+        return service_state or "active", ""
+
+    if service_state in {
+        "inactive",
+        "failed",
+        "activating",
+        "deactivating",
+    }:
+        return service_state, error
+
+    return (
+        "error",
+        error
+        or output
+        or "Unable to read the NetShield capture service state.",
+    )
+
+
+def _read_capture_service_pid() -> int | None:
+    """Return the packet-capture service MainPID."""
+    return_code, output, _error = _run_service_command(
+        [
+            "show",
+            CAPTURE_SERVICE_NAME,
+            "--property=MainPID",
+            "--value",
+        ],
+        timeout=10,
+    )
+
+    if return_code != 0:
+        return None
+
+    try:
+        process_id = int(output)
+    except (TypeError, ValueError):
+        return None
+
+    return process_id if process_id > 0 else None
+
+
+def read_capture_status() -> dict:
+    """Return packet-capture service and adapter status."""
+    service_state, service_error = _read_capture_service_state()
+
+    state_mapping = {
+        "active": "running",
+        "activating": "starting",
+        "deactivating": "stopping",
+        "inactive": "idle",
+        "failed": "error",
+        "error": "error",
+    }
+
+    capture_state = state_mapping.get(service_state, "error")
+
+    running = capture_state in {
+        "starting",
+        "running",
+        "stopping",
+    }
+
+    messages = {
+        "starting": (
+            f"Starting packet capture on {CAPTURE_SERVICE_INTERFACE}."
+        ),
+        "running": (
+            f"Capturing packets on {CAPTURE_SERVICE_INTERFACE}."
+        ),
+        "stopping": "Stopping packet capture safely.",
+        "idle": "Packet capture is idle.",
+        "error": "The packet-capture service encountered an error.",
+    }
+
+    return {
+        "state": capture_state,
+        "running": running,
+        "interface": (
+            CAPTURE_SERVICE_INTERFACE if running else None
+        ),
+        "pid": (
+            _read_capture_service_pid() if running else None
+        ),
+        "last_error": service_error,
+        "message": messages[capture_state],
+        "adapter": read_adapter_status(),
+        "packet_log_found": PACKET_LOG_CSV.exists(),
+    }
+
+
+def start_capture_process(
+    interface: str | None = None,
+) -> tuple[dict, int]:
+    """Start the protected packet-capture service."""
+    scanner_status = read_scanner_status()
+
+    if scanner_status["running"]:
+        return {
+            "ok": False,
+            "state": "service_conflict",
+            "message": (
+                "Stop WiFi scanning before starting packet capture."
+            ),
+            "scanner": scanner_status,
+        }, 409
+
+    adapter = read_adapter_status()
+
+    if not adapter["available"]:
+        return {
+            "ok": False,
+            "state": "not_detected",
+            "message": adapter["message"],
+        }, 409
+
+    interface_names = [
+        item["name"]
+        for item in adapter["interfaces"]
+    ]
+
+    selected_interface = interface or interface_names[0]
+
+    if selected_interface not in interface_names:
+        return {
+            "ok": False,
+            "state": "invalid_interface",
+            "message": (
+                f"Wireless interface '{selected_interface}' "
+                "is not currently available."
+            ),
+        }, 400
+
+    if selected_interface != CAPTURE_SERVICE_INTERFACE:
+        return {
+            "ok": False,
+            "state": "interface_not_configured",
+            "message": (
+                "The protected packet-capture service is configured "
+                f"for {CAPTURE_SERVICE_INTERFACE}, not "
+                f"{selected_interface}."
+            ),
+        }, 409
+
+    current_status = read_capture_status()
+
+    if current_status["running"]:
+        return {
+            "ok": False,
+            "state": current_status["state"],
+            "message": "Packet capture is already running.",
+            "capture": current_status,
+        }, 409
+
+    return_code, output, error = _run_service_command(
+        ["start", CAPTURE_SERVICE_NAME],
+    )
+
+    if return_code != 0:
+        return {
+            "ok": False,
+            "state": "error",
+            "message": (
+                error
+                or output
+                or "Unable to start packet capture."
+            ),
+        }, 500
+
+    capture_status = read_capture_status()
+
+    return {
+        "ok": True,
+        "capture": capture_status,
+    }, 202
+
+
+def stop_capture_process() -> tuple[dict, int]:
+    """Stop the protected packet-capture service safely."""
+    current_status = read_capture_status()
+
+    if not current_status["running"]:
+        current_status["state"] = "idle"
+        current_status["message"] = (
+            "Packet capture is already stopped."
+        )
+
+        return {
+            "ok": True,
+            "capture": current_status,
+        }, 200
+
+    return_code, output, error = _run_service_command(
+        ["stop", CAPTURE_SERVICE_NAME],
+    )
+
+    if return_code != 0:
+        return {
+            "ok": False,
+            "state": "error",
+            "message": (
+                error
+                or output
+                or "Unable to stop packet capture."
+            ),
+        }, 500
+
+    capture_status = read_capture_status()
+    capture_status["message"] = (
+        "Packet capture stopped. CSV log was preserved."
+    )
+
+    return {
+        "ok": True,
+        "capture": capture_status,
     }, 200
 
 
@@ -923,6 +1165,26 @@ def scanner_start():
 @app.post("/api/scanner/stop")
 def scanner_stop():
     response, status_code = stop_scanner_process()
+    return jsonify(response), status_code
+
+
+@app.get("/api/capture/status")
+def capture_status():
+    return jsonify(read_capture_status())
+
+
+@app.post("/api/capture/start")
+def capture_start():
+    request_data = request.get_json(silent=True) or {}
+    response, status_code = start_capture_process(
+        request_data.get("interface")
+    )
+    return jsonify(response), status_code
+
+
+@app.post("/api/capture/stop")
+def capture_stop():
+    response, status_code = stop_capture_process()
     return jsonify(response), status_code
 
 
