@@ -5963,3 +5963,25 @@ a {
     width: 100%;
   }
 }
+
+/* Recent Live Packets panel */
+
+.dashboardPage .livePacketsPanel {
+  width: 100%;
+  margin-top: 22px;
+}
+
+.dashboardPage .livePacketTable {
+  width: 100%;
+  overflow-x: auto;
+}
+
+.dashboardPage .livePacketTable .tableHead,
+.dashboardPage .livePacketTable .tableData {
+  min-width: 850px;
+  grid-template-columns: 0.75fr 1fr 1.4fr 1.4fr 0.65fr;
+}
+
+.dashboardPage .livePacketTable .tableData span {
+  overflow-wrap: anywhere;
+}

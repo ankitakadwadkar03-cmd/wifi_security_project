@@ -33,6 +33,8 @@ const EMPTY_CAPTURE_STATUS = {
 export default function DashboardPage({ setCurrentPage }) {
   const [networks, setNetworks] = useState([]);
   const [threats, setThreats] = useState([]);
+  const [packets, setPackets] = useState([]);
+  const [packetsLoading, setPacketsLoading] = useState(true);
   const [latestHistory, setLatestHistory] = useState(null);
   const [backendStatus, setBackendStatus] = useState("Checking");
   const [scannerStatus, setScannerStatus] = useState(EMPTY_SCANNER_STATUS);
@@ -109,6 +111,32 @@ export default function DashboardPage({ setCurrentPage }) {
     }
   }
 
+  async function loadPackets() {
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/api/packets?limit=20`
+      );
+
+      if (!response.ok) {
+        throw new Error(
+          `Packets endpoint returned HTTP ${response.status}`
+        );
+      }
+
+      const data = await response.json();
+
+      setPackets(
+        Array.isArray(data.packets)
+          ? data.packets
+          : []
+      );
+    } catch (packetError) {
+      console.error("Recent packets error:", packetError);
+    } finally {
+      setPacketsLoading(false);
+    }
+  }
+
   useEffect(() => {
     const controller = new AbortController();
 
@@ -121,6 +149,7 @@ export default function DashboardPage({ setCurrentPage }) {
           healthResponse,
           networksResponse,
           threatsResponse,
+          packetsResponse,
           historyResponse,
         ] = await Promise.all([
           fetch(`${API_BASE_URL}/api/health`, {
@@ -132,6 +161,9 @@ export default function DashboardPage({ setCurrentPage }) {
           fetch(`${API_BASE_URL}/api/threats`, {
             signal: controller.signal,
           }),
+          fetch(`${API_BASE_URL}/api/packets?limit=20`, {
+            signal: controller.signal,
+          }),
           fetch(`${API_BASE_URL}/api/history`, {
             signal: controller.signal,
           }),
@@ -141,6 +173,7 @@ export default function DashboardPage({ setCurrentPage }) {
           !healthResponse.ok ||
           !networksResponse.ok ||
           !threatsResponse.ok ||
+          !packetsResponse.ok ||
           !historyResponse.ok
         ) {
           throw new Error("One or more NetShield API routes returned an error.");
@@ -149,6 +182,7 @@ export default function DashboardPage({ setCurrentPage }) {
         const healthData = await healthResponse.json();
         const networkData = await networksResponse.json();
         const threatData = await threatsResponse.json();
+        const packetData = await packetsResponse.json();
         const historyData = await historyResponse.json();
 
         setBackendStatus(
@@ -164,6 +198,12 @@ export default function DashboardPage({ setCurrentPage }) {
         setThreats(
           Array.isArray(threatData.threats)
             ? threatData.threats
+            : []
+        );
+
+        setPackets(
+          Array.isArray(packetData.packets)
+            ? packetData.packets
             : []
         );
 
@@ -188,6 +228,7 @@ export default function DashboardPage({ setCurrentPage }) {
     const pollingTimer = window.setInterval(() => {
       loadScannerStatus();
       loadCaptureStatus();
+      loadPackets();
     }, 2000);
 
     return () => {
@@ -347,6 +388,8 @@ export default function DashboardPage({ setCurrentPage }) {
     captureRunning &&
     !captureActionLoading &&
     !scannerActionLoading;
+
+  const recentPackets = packets.slice(0, 20);
 
   return (
     <section className="appPage dashboardPage">
@@ -666,6 +709,56 @@ export default function DashboardPage({ setCurrentPage }) {
             </>
           )}
         </div>
+      </div>
+
+      <div className="largePanel livePacketsPanel">
+        <div className="panelTitle">
+          <h2>Recent Live Packets</h2>
+        </div>
+
+        {packetsLoading ? (
+          <div className="networkTableMessage">
+            Loading packets...
+          </div>
+        ) : recentPackets.length === 0 ? (
+          <div className="networkTableMessage">
+            No packet captures available.
+          </div>
+        ) : (
+          <div className="cleanTable livePacketTable">
+            <div className="tableHead">
+              <span>Time</span>
+              <span>Packet Type</span>
+              <span>Source MAC</span>
+              <span>Destination</span>
+              <span>Signal</span>
+            </div>
+
+            {recentPackets.map((packet, index) => (
+              <div
+                className="tableData"
+                key={`${packet.timestamp}-${packet.source_mac}-${index}`}
+              >
+                <span>{packet.timestamp || "—"}</span>
+
+                <span>
+                  {packet.packet_type || packet.frame_type || "—"}
+                </span>
+
+                <span>{packet.source_mac || "—"}</span>
+
+                <span>{packet.destination_mac || "—"}</span>
+
+                <span>
+                  {packet.signal_strength !== null &&
+                  packet.signal_strength !== undefined
+                    ? `${packet.signal_strength} dBm`
+                    : "—"}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </section>
   );

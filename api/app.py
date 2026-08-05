@@ -10,6 +10,7 @@ import time
 import sqlite3
 import shutil
 import subprocess
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -162,6 +163,50 @@ def _safe_int(value, default=0):
         return int(str(value).strip())
     except (TypeError, ValueError):
         return default
+
+
+def read_packets(limit: int = 50) -> list[dict]:
+    """Return the most recent packet-capture rows."""
+    if not PACKET_LOG_CSV.exists():
+        return []
+
+    safe_limit = max(1, min(limit, 500))
+    recent_rows = deque(maxlen=safe_limit)
+
+    with PACKET_LOG_CSV.open(
+        "r", encoding="utf-8", newline=""
+    ) as csv_file:
+        reader = csv.DictReader(csv_file)
+
+        for row in reader:
+            recent_rows.append(
+                {
+                    "timestamp": (
+                        row.get("Timestamp") or ""
+                    ).strip(),
+                    "packet_type": (
+                        row.get("Packet Type") or "Unknown"
+                    ).strip(),
+                    "source_mac": _normalize_bssid(
+                        row.get("Source MAC")
+                    ),
+                    "destination_mac": (
+                        row.get("Destination MAC") or "Unknown"
+                    ).strip(),
+                    "bssid": _normalize_bssid(
+                        row.get("BSSID")
+                    ),
+                    "frame_type": (
+                        row.get("Frame Type") or "Unknown"
+                    ).strip(),
+                    "signal_strength": _safe_int(
+                        row.get("Signal Strength"),
+                        default=0,
+                    ),
+                }
+            )
+
+    return list(reversed(recent_rows))
 
 
 def read_threats() -> list[dict]:
@@ -1060,6 +1105,25 @@ def networks():
             "count": len(network_rows),
             "source": "wifi_scan_results.csv",
             "networks": network_rows,
+        }
+    )
+
+
+@app.get("/api/packets")
+def packets():
+    limit = request.args.get(
+        "limit",
+        default=50,
+        type=int,
+    )
+
+    packet_rows = read_packets(limit=limit)
+
+    return jsonify(
+        {
+            "count": len(packet_rows),
+            "source": "wifi_packets.csv",
+            "packets": packet_rows,
         }
     )
 
