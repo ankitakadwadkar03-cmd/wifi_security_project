@@ -111,6 +111,30 @@ export default function DashboardPage({ setCurrentPage }) {
     }
   }
 
+  async function loadNetworks() {
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/api/networks`
+      );
+
+      if (!response.ok) {
+        throw new Error(
+          `Networks endpoint returned HTTP ${response.status}`
+        );
+      }
+
+      const data = await response.json();
+
+      setNetworks(
+        Array.isArray(data.networks)
+          ? data.networks
+          : []
+      );
+    } catch (networkError) {
+      console.error("Recent networks error:", networkError);
+    }
+  }
+
   async function loadPackets() {
     try {
       const response = await fetch(
@@ -277,6 +301,10 @@ export default function DashboardPage({ setCurrentPage }) {
       );
 
       await loadScannerStatus();
+
+      if (action === "stop") {
+        await loadNetworks();
+      }
     } catch (actionError) {
       console.error(`Scanner ${action} error:`, actionError);
       setScannerMessage(actionError.message);
@@ -390,6 +418,60 @@ export default function DashboardPage({ setCurrentPage }) {
     !scannerActionLoading;
 
   const recentPackets = packets.slice(0, 20);
+
+  const packetSignals = recentPackets
+    .map((packet) => Number(packet.signal_strength))
+    .filter((signal) => Number.isFinite(signal));
+
+  const managementPacketCount = recentPackets.filter(
+    (packet) =>
+      String(packet.frame_type).toLowerCase() === "management"
+  ).length;
+
+  const dataPacketCount = recentPackets.filter(
+    (packet) =>
+      String(packet.frame_type).toLowerCase() === "data"
+  ).length;
+
+  const controlPacketCount = recentPackets.filter(
+    (packet) =>
+      String(packet.frame_type).toLowerCase() === "control"
+  ).length;
+
+  const averageSignal =
+    packetSignals.length > 0
+      ? `${Math.round(
+          packetSignals.reduce((total, signal) => total + signal, 0) /
+            packetSignals.length
+        )} dBm`
+      : "—";
+
+  const strongestSignal =
+    packetSignals.length > 0
+      ? `${Math.max(...packetSignals)} dBm`
+      : "—";
+
+  const sourceActivity = recentPackets.reduce((counts, packet) => {
+    const source = packet.source_mac || "Unknown";
+    counts[source] = (counts[source] || 0) + 1;
+    return counts;
+  }, {});
+
+  const mostActiveSource =
+    Object.entries(sourceActivity).sort(
+      (first, second) => second[1] - first[1]
+    )[0]?.[0] || "—";
+
+  const packetTypeActivity = recentPackets.reduce((counts, packet) => {
+    const packetType = packet.packet_type || "Unknown";
+    counts[packetType] = (counts[packetType] || 0) + 1;
+    return counts;
+  }, {});
+
+  const mostCommonPacketType =
+    Object.entries(packetTypeActivity).sort(
+      (first, second) => second[1] - first[1]
+    )[0]?.[0] || "—";
 
   return (
     <section className="appPage dashboardPage">
@@ -714,6 +796,48 @@ export default function DashboardPage({ setCurrentPage }) {
       <div className="largePanel livePacketsPanel">
         <div className="panelTitle">
           <h2>Recent Live Packets</h2>
+        </div>
+
+        <div className="packetAnalyticsGrid">
+          <div className="packetAnalyticsCard">
+            <span>Total Packets</span>
+            <strong>{recentPackets.length}</strong>
+          </div>
+
+          <div className="packetAnalyticsCard">
+            <span>Management</span>
+            <strong>{managementPacketCount}</strong>
+          </div>
+
+          <div className="packetAnalyticsCard">
+            <span>Data</span>
+            <strong>{dataPacketCount}</strong>
+          </div>
+
+          <div className="packetAnalyticsCard">
+            <span>Control</span>
+            <strong>{controlPacketCount}</strong>
+          </div>
+
+          <div className="packetAnalyticsCard">
+            <span>Average Signal</span>
+            <strong>{averageSignal}</strong>
+          </div>
+
+          <div className="packetAnalyticsCard">
+            <span>Strongest Signal</span>
+            <strong>{strongestSignal}</strong>
+          </div>
+
+          <div className="packetAnalyticsCard packetAnalyticsWide">
+            <span>Most Active Source</span>
+            <strong>{mostActiveSource}</strong>
+          </div>
+
+          <div className="packetAnalyticsCard packetAnalyticsWide">
+            <span>Most Common Type</span>
+            <strong>{mostCommonPacketType}</strong>
+          </div>
         </div>
 
         {packetsLoading ? (
