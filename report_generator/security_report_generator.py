@@ -102,8 +102,11 @@ def compute_metrics(
         packets_by_bssid.setdefault(resolved_bssid, []).append(packet)
 
     metric_rows: list[dict[str, object]] = []
+
+    # The network report must contain only access points detected
+    # by the WiFi scanner. Packet-only MAC addresses are clients
+    # or broadcast devices and do not have an SSID.
     all_bssids = set(normalized_scan.keys())
-    all_bssids.update(packets_by_bssid.keys())
 
     for bssid in sorted(all_bssids):
         if not bssid or bssid == "Unknown":

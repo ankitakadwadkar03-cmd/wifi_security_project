@@ -5985,3 +5985,58 @@ a {
 .dashboardPage .livePacketTable .tableData span {
   overflow-wrap: anywhere;
 }
+
+/* Live Packet Analytics Summary */
+
+.dashboardPage .packetAnalyticsGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+  margin-bottom: 24px;
+}
+
+.dashboardPage .packetAnalyticsCard {
+  min-width: 0;
+  padding: 18px;
+  border: 1px solid rgba(0, 200, 255, 0.2);
+  border-radius: 14px;
+  background: rgba(2, 18, 36, 0.72);
+}
+
+.dashboardPage .packetAnalyticsCard span {
+  display: block;
+  margin-bottom: 9px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.dashboardPage .packetAnalyticsCard strong {
+  display: block;
+  overflow-wrap: anywhere;
+  color: #ffffff;
+  font-size: 21px;
+  line-height: 1.25;
+}
+
+.dashboardPage .packetAnalyticsWide {
+  grid-column: span 2;
+}
+
+@media (max-width: 900px) {
+  .dashboardPage .packetAnalyticsGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .dashboardPage .packetAnalyticsWide {
+    grid-column: span 1;
+  }
+}
+
+@media (max-width: 560px) {
+  .dashboardPage .packetAnalyticsGrid {
+    grid-template-columns: 1fr;
+  }
+}
