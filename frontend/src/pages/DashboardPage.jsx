@@ -35,6 +35,9 @@ export default function DashboardPage({ setCurrentPage }) {
   const [threats, setThreats] = useState([]);
   const [packets, setPackets] = useState([]);
   const [packetsLoading, setPacketsLoading] = useState(true);
+  const [packetTypeFilter, setPacketTypeFilter] = useState("All");
+  const [packetMacSearch, setPacketMacSearch] = useState("");
+  const [packetSignalFilter, setPacketSignalFilter] = useState("All");
   const [latestHistory, setLatestHistory] = useState(null);
   const [backendStatus, setBackendStatus] = useState("Checking");
   const [scannerStatus, setScannerStatus] = useState(EMPTY_SCANNER_STATUS);
@@ -419,21 +422,60 @@ export default function DashboardPage({ setCurrentPage }) {
 
   const recentPackets = packets.slice(0, 20);
 
-  const packetSignals = recentPackets
+  const filteredPackets = recentPackets.filter((packet) => {
+    const packetType =
+      String(packet.packet_type || packet.frame_type || "").toLowerCase();
+
+    const sourceMac =
+      String(packet.source_mac || "").toLowerCase();
+
+    const destinationMac =
+      String(packet.destination_mac || "").toLowerCase();
+
+    const searchValue = packetMacSearch.trim().toLowerCase();
+
+    const signal = Number(packet.signal_strength);
+
+    const matchesType =
+      packetTypeFilter === "All" ||
+      packetType.includes(packetTypeFilter.toLowerCase());
+
+    const matchesMac =
+      !searchValue ||
+      sourceMac.includes(searchValue) ||
+      destinationMac.includes(searchValue);
+
+    const matchesSignal =
+      packetSignalFilter === "All" ||
+      (packetSignalFilter === "Strong" &&
+        Number.isFinite(signal) &&
+        signal >= -60) ||
+      (packetSignalFilter === "Medium" &&
+        Number.isFinite(signal) &&
+        signal < -60 &&
+        signal >= -80) ||
+      (packetSignalFilter === "Weak" &&
+        Number.isFinite(signal) &&
+        signal < -80);
+
+    return matchesType && matchesMac && matchesSignal;
+  });
+
+  const packetSignals = filteredPackets
     .map((packet) => Number(packet.signal_strength))
     .filter((signal) => Number.isFinite(signal));
 
-  const managementPacketCount = recentPackets.filter(
+  const managementPacketCount = filteredPackets.filter(
     (packet) =>
       String(packet.frame_type).toLowerCase() === "management"
   ).length;
 
-  const dataPacketCount = recentPackets.filter(
+  const dataPacketCount = filteredPackets.filter(
     (packet) =>
       String(packet.frame_type).toLowerCase() === "data"
   ).length;
 
-  const controlPacketCount = recentPackets.filter(
+  const controlPacketCount = filteredPackets.filter(
     (packet) =>
       String(packet.frame_type).toLowerCase() === "control"
   ).length;
@@ -451,7 +493,7 @@ export default function DashboardPage({ setCurrentPage }) {
       ? `${Math.max(...packetSignals)} dBm`
       : "—";
 
-  const sourceActivity = recentPackets.reduce((counts, packet) => {
+  const sourceActivity = filteredPackets.reduce((counts, packet) => {
     const source = packet.source_mac || "Unknown";
     counts[source] = (counts[source] || 0) + 1;
     return counts;
@@ -462,7 +504,7 @@ export default function DashboardPage({ setCurrentPage }) {
       (first, second) => second[1] - first[1]
     )[0]?.[0] || "—";
 
-  const packetTypeActivity = recentPackets.reduce((counts, packet) => {
+  const packetTypeActivity = filteredPackets.reduce((counts, packet) => {
     const packetType = packet.packet_type || "Unknown";
     counts[packetType] = (counts[packetType] || 0) + 1;
     return counts;
@@ -798,10 +840,47 @@ export default function DashboardPage({ setCurrentPage }) {
           <h2>Recent Live Packets</h2>
         </div>
 
+        <div className="packetFilterBar">
+          <select
+            value={packetTypeFilter}
+            onChange={(event) =>
+              setPacketTypeFilter(event.target.value)
+            }
+          >
+            <option value="All">All Packet Types</option>
+            <option value="Probe Request">Probe Request</option>
+            <option value="Beacon">Beacon</option>
+            <option value="Data">Data</option>
+            <option value="Control">Control</option>
+            <option value="Deauthentication">Deauthentication</option>
+          </select>
+
+          <input
+            type="text"
+            value={packetMacSearch}
+            onChange={(event) =>
+              setPacketMacSearch(event.target.value)
+            }
+            placeholder="Search MAC address"
+          />
+
+          <select
+            value={packetSignalFilter}
+            onChange={(event) =>
+              setPacketSignalFilter(event.target.value)
+            }
+          >
+            <option value="All">All Signal Levels</option>
+            <option value="Strong">Strong (≥ -60 dBm)</option>
+            <option value="Medium">Medium (-61 to -80 dBm)</option>
+            <option value="Weak">Weak (&lt; -80 dBm)</option>
+          </select>
+        </div>
+
         <div className="packetAnalyticsGrid">
           <div className="packetAnalyticsCard">
             <span>Total Packets</span>
-            <strong>{recentPackets.length}</strong>
+            <strong>{filteredPackets.length}</strong>
           </div>
 
           <div className="packetAnalyticsCard">
@@ -848,6 +927,10 @@ export default function DashboardPage({ setCurrentPage }) {
           <div className="networkTableMessage">
             No packet captures available.
           </div>
+        ) : filteredPackets.length === 0 ? (
+          <div className="networkTableMessage">
+            No packets match the selected filters.
+          </div>
         ) : (
           <div className="cleanTable livePacketTable">
             <div className="tableHead">
@@ -858,7 +941,7 @@ export default function DashboardPage({ setCurrentPage }) {
               <span>Signal</span>
             </div>
 
-            {recentPackets.map((packet, index) => (
+            {filteredPackets.map((packet, index) => (
               <div
                 className="tableData"
                 key={`${packet.timestamp}-${packet.source_mac}-${index}`}
