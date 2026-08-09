@@ -6040,3 +6040,40 @@ a {
     grid-template-columns: 1fr;
   }
 }
+
+/* Live Packet Search and Filters */
+
+.dashboardPage .packetFilterBar {
+  display: grid;
+  grid-template-columns: 1fr 1.4fr 1fr;
+  gap: 14px;
+  margin-bottom: 20px;
+}
+
+.dashboardPage .packetFilterBar select,
+.dashboardPage .packetFilterBar input {
+  width: 100%;
+  min-height: 46px;
+  padding: 0 14px;
+  border: 1px solid rgba(0, 200, 255, 0.22);
+  border-radius: 12px;
+  background: rgba(2, 18, 36, 0.76);
+  color: #ffffff;
+  font: inherit;
+  outline: none;
+}
+
+.dashboardPage .packetFilterBar input::placeholder {
+  color: var(--muted);
+}
+
+.dashboardPage .packetFilterBar select:focus,
+.dashboardPage .packetFilterBar input:focus {
+  border-color: rgba(0, 200, 255, 0.65);
+}
+
+@media (max-width: 900px) {
+  .dashboardPage .packetFilterBar {
+    grid-template-columns: 1fr;
+  }
+}
