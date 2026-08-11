@@ -209,6 +209,220 @@ def read_packets(limit: int = 50) -> list[dict]:
     return list(reversed(recent_rows))
 
 
+def read_packet_alerts() -> list[dict]:
+    """Detect potential security events in the latest captured packets."""
+    packets = read_packets(limit=200)
+
+    if not packets:
+        return []
+
+    def timestamp_seconds(value: str) -> int | None:
+        try:
+            parsed = datetime.strptime(value, "%H:%M:%S")
+            return (
+                parsed.hour * 3600
+                + parsed.minute * 60
+                + parsed.second
+            )
+        except (TypeError, ValueError):
+            return None
+
+    latest_seconds = None
+
+    for packet in packets:
+        latest_seconds = timestamp_seconds(packet.get("timestamp", ""))
+
+        if latest_seconds is not None:
+            break
+
+    if latest_seconds is None:
+        return []
+
+    def packets_within(seconds: int) -> list[dict]:
+        recent = []
+
+        for packet in packets:
+            packet_seconds = timestamp_seconds(
+                packet.get("timestamp", "")
+            )
+
+            if packet_seconds is None:
+                continue
+
+            age = (latest_seconds - packet_seconds) % 86400
+
+            if age <= seconds:
+                recent.append(packet)
+
+        return recent
+
+    alerts: list[dict] = []
+
+    recent_10 = packets_within(10)
+    recent_5 = packets_within(5)
+
+    # High: multiple deauthentication frames in a short period.
+    deauth_packets = [
+        packet
+        for packet in recent_10
+        if "deauth" in str(
+            packet.get("packet_type", "")
+        ).lower()
+    ]
+
+    if len(deauth_packets) >= 5:
+        packet = deauth_packets[0]
+
+        alerts.append(
+            {
+                "severity": "High",
+                "title": "Potential Deauthentication Burst",
+                "bssid": (
+                    packet.get("bssid")
+                    or packet.get("source_mac")
+                    or "Unknown"
+                ),
+                "summary": (
+                    f"{len(deauth_packets)} deauthentication packets "
+                    "were observed within 10 seconds. This is an "
+                    "automated defensive alert and should be verified "
+                    "before concluding that an attack occurred."
+                ),
+                "source": "live_packet_analysis",
+                "alert_type": "DEAUTH_BURST",
+            }
+        )
+
+    # Medium: unusually high total packet activity.
+    if len(recent_5) >= 40:
+        alerts.append(
+            {
+                "severity": "Medium",
+                "title": "High Packet Activity",
+                "bssid": "Multiple Devices",
+                "summary": (
+                    f"{len(recent_5)} packets were observed within "
+                    "5 seconds. This may be normal busy-network traffic "
+                    "or activity that requires further review."
+                ),
+                "source": "live_packet_analysis",
+                "alert_type": "PACKET_BURST",
+            }
+        )
+
+    # Count Authentication and Probe Request activity by source.
+    auth_by_source: dict[str, int] = {}
+    probe_by_source: dict[str, int] = {}
+
+    for packet in recent_10:
+        source = packet.get("source_mac") or "Unknown"
+
+        if source in {"", "UNKNOWN", "BROADCAST"}:
+            continue
+
+        packet_type = str(
+            packet.get("packet_type", "")
+        ).lower()
+
+        if packet_type == "authentication":
+            auth_by_source[source] = (
+                auth_by_source.get(source, 0) + 1
+            )
+
+        if packet_type == "probe request":
+            probe_by_source[source] = (
+                probe_by_source.get(source, 0) + 1
+            )
+
+    if auth_by_source:
+        source, count = max(
+            auth_by_source.items(),
+            key=lambda item: item[1],
+        )
+
+        if count >= 15:
+            alerts.append(
+                {
+                    "severity": "Medium",
+                    "title": "Repeated Authentication Activity",
+                    "bssid": source,
+                    "summary": (
+                        f"{count} authentication packets from the same "
+                        "source were observed within 10 seconds. Review "
+                        "the activity to determine whether it is expected."
+                    ),
+                    "source": "live_packet_analysis",
+                    "alert_type": "AUTH_BURST",
+                }
+            )
+
+    if probe_by_source:
+        source, count = max(
+            probe_by_source.items(),
+            key=lambda item: item[1],
+        )
+
+        if count >= 20:
+            alerts.append(
+                {
+                    "severity": "Low",
+                    "title": "Repeated Probe Request Activity",
+                    "bssid": source,
+                    "summary": (
+                        f"{count} probe requests from the same source "
+                        "were observed within 10 seconds. Device discovery "
+                        "can cause this normally, so this alert is "
+                        "informational and requires context."
+                    ),
+                    "source": "live_packet_analysis",
+                    "alert_type": "PROBE_BURST",
+                }
+            )
+
+    alert_counts = {
+        "DEAUTH_BURST": len(deauth_packets),
+        "PACKET_BURST": len(recent_5),
+        "AUTH_BURST": max(auth_by_source.values(), default=0),
+        "PROBE_BURST": max(probe_by_source.values(), default=0),
+    }
+
+    for alert in alerts:
+        alert_type = alert.get("alert_type", "PACKET_ACTIVITY")
+        severity = alert.get("severity", "Low")
+
+        alert.setdefault("ssid", "Live Packet Activity")
+        alert.setdefault("encryption", "Not applicable")
+        alert.setdefault("attack_type", alert_type)
+        alert.setdefault(
+            "total_packets",
+            alert_counts.get(alert_type, 0),
+        )
+        alert.setdefault(
+            "risk_level",
+            {
+                "High": "WARNING",
+                "Medium": "LOW RISK",
+                "Low": "LOW RISK",
+            }.get(severity, "REVIEW"),
+        )
+
+    severity_order = {
+        "High": 3,
+        "Medium": 2,
+        "Low": 1,
+    }
+
+    alerts.sort(
+        key=lambda alert: severity_order.get(
+            alert.get("severity"),
+            0,
+        ),
+        reverse=True,
+    )
+
+    return alerts
+
+
 def read_threats() -> list[dict]:
     """Read non-normal findings from the final security report."""
     if not SECURITY_REPORT_CSV.exists():
@@ -1130,12 +1344,20 @@ def packets():
 
 @app.get("/api/threats")
 def threats():
-    threat_rows = read_threats()
+    live_alerts = read_packet_alerts()
+    report_findings = read_threats()
+
+    threat_rows = live_alerts + report_findings
 
     return jsonify(
         {
             "count": len(threat_rows),
-            "source": "final_security_report.csv",
+            "sources": [
+                "live_packet_analysis",
+                "final_security_report.csv",
+            ],
+            "live_alert_count": len(live_alerts),
+            "report_finding_count": len(report_findings),
             "threats": threat_rows,
         }
     )

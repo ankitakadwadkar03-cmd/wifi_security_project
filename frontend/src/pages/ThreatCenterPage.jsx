@@ -19,9 +19,12 @@ export default function ThreatCenterPage() {
   useEffect(() => {
     const controller = new AbortController();
 
-    async function loadThreats() {
+    async function loadThreats(showLoading = false) {
       try {
-        setLoading(true);
+        if (showLoading) {
+          setLoading(true);
+        }
+
         setError("");
 
         const response = await fetch(`${API_BASE_URL}/api/threats`, {
@@ -42,13 +45,22 @@ export default function ThreatCenterPage() {
           );
         }
       } finally {
-        setLoading(false);
+        if (showLoading) {
+          setLoading(false);
+        }
       }
     }
 
-    loadThreats();
+    loadThreats(true);
 
-    return () => controller.abort();
+    const pollingTimer = window.setInterval(() => {
+      loadThreats(false);
+    }, 2000);
+
+    return () => {
+      controller.abort();
+      window.clearInterval(pollingTimer);
+    };
   }, []);
 
   return (
