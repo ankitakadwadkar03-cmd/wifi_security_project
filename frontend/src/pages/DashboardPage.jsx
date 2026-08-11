@@ -1,4 +1,18 @@
 import { useEffect, useState } from "react";
+import {
+  ResponsiveContainer,
+  PieChart,
+  Pie,
+  Cell,
+  Tooltip,
+  LineChart,
+  Line,
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+} from "recharts";
 import StatusBadge from "../components/StatusBadge";
 
 const API_BASE_URL =
@@ -515,6 +529,46 @@ export default function DashboardPage({ setCurrentPage }) {
       (first, second) => second[1] - first[1]
     )[0]?.[0] || "—";
 
+  const packetTypeChartData = [
+    {
+      name: "Management",
+      value: managementPacketCount,
+    },
+    {
+      name: "Data",
+      value: dataPacketCount,
+    },
+    {
+      name: "Control",
+      value: controlPacketCount,
+    },
+  ].filter((item) => item.value > 0);
+
+  const signalTrendData = filteredPackets
+    .slice()
+    .reverse()
+    .map((packet, index) => {
+      const signal = Number(packet.signal_strength);
+
+      if (!Number.isFinite(signal)) {
+        return null;
+      }
+
+      return {
+        packet: index + 1,
+        signal,
+        time: packet.timestamp || `Packet ${index + 1}`,
+      };
+    })
+    .filter(Boolean);
+
+  const packetActivityData = Object.entries(packetTypeActivity)
+    .map(([name, value]) => ({
+      name,
+      value,
+    }))
+    .sort((first, second) => second.value - first.value);
+
   return (
     <section className="appPage dashboardPage">
       <div className="pageHeader">
@@ -916,6 +970,185 @@ export default function DashboardPage({ setCurrentPage }) {
           <div className="packetAnalyticsCard packetAnalyticsWide">
             <span>Most Common Type</span>
             <strong>{mostCommonPacketType}</strong>
+          </div>
+        </div>
+
+        <div className="packetChartsGrid">
+          <div className="packetChartCard">
+            <div className="packetChartHeader">
+              <span>Live Analytics</span>
+              <h3>Packet Type Distribution</h3>
+              <p>Distribution of packets currently matching the selected filters.</p>
+            </div>
+
+            {packetTypeChartData.length === 0 ? (
+              <div className="packetChartEmpty">
+                No packet data available for this chart.
+              </div>
+            ) : (
+              <div className="packetChartCanvas">
+                <ResponsiveContainer width="100%" height="100%">
+                  <PieChart>
+                    <Pie
+                      data={packetTypeChartData}
+                      dataKey="value"
+                      nameKey="name"
+                      cx="50%"
+                      cy="50%"
+                      innerRadius={62}
+                      outerRadius={95}
+                      paddingAngle={4}
+                    >
+                      {packetTypeChartData.map((entry, index) => (
+                        <Cell
+                          key={entry.name}
+                          fill={
+                            [
+                              "var(--blue)",
+                              "var(--green)",
+                              "var(--amber)",
+                            ][index % 3]
+                          }
+                        />
+                      ))}
+                    </Pie>
+
+                    <Tooltip
+                      contentStyle={{
+                        background: "#07111f",
+                        border: "1px solid rgba(56, 189, 248, 0.32)",
+                        borderRadius: "10px",
+                        color: "#e5f0ff",
+                      }}
+                    />
+                  </PieChart>
+                </ResponsiveContainer>
+              </div>
+            )}
+          </div>
+
+          <div className="packetChartCard">
+            <div className="packetChartHeader">
+              <span>Live Analytics</span>
+              <h3>Signal Strength Trend</h3>
+              <p>Signal strength of recent packets in chronological order.</p>
+            </div>
+
+            {signalTrendData.length === 0 ? (
+              <div className="packetChartEmpty">
+                No signal-strength data available.
+              </div>
+            ) : (
+              <div className="packetChartCanvas">
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={signalTrendData}>
+                    <CartesianGrid
+                      stroke="rgba(148, 163, 184, 0.14)"
+                      strokeDasharray="4 4"
+                    />
+
+                    <XAxis
+                      dataKey="time"
+                      tick={{
+                        fill: "#94a3b8",
+                        fontSize: 11,
+                      }}
+                      minTickGap={25}
+                    />
+
+                    <YAxis
+                      tick={{
+                        fill: "#94a3b8",
+                        fontSize: 11,
+                      }}
+                      unit=" dBm"
+                      width={70}
+                    />
+
+                    <Tooltip
+                      contentStyle={{
+                        background: "#07111f",
+                        border: "1px solid rgba(56, 189, 248, 0.32)",
+                        borderRadius: "10px",
+                        color: "#e5f0ff",
+                      }}
+                      formatter={(value) => [`${value} dBm`, "Signal"]}
+                    />
+
+                    <Line
+                      type="monotone"
+                      dataKey="signal"
+                      stroke="var(--green)"
+                      strokeWidth={3}
+                      dot={{
+                        r: 3,
+                        fill: "#22c55e",
+                      }}
+                      activeDot={{
+                        r: 5,
+                      }}
+                    />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            )}
+          </div>
+
+          <div className="packetChartCard packetChartWide">
+            <div className="packetChartHeader">
+              <span>Live Analytics</span>
+              <h3>Packet Activity by Type</h3>
+              <p>Number of recent packets detected for each packet subtype.</p>
+            </div>
+
+            {packetActivityData.length === 0 ? (
+              <div className="packetChartEmpty">
+                No packet activity available.
+              </div>
+            ) : (
+              <div className="packetChartCanvas">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={packetActivityData}>
+                    <CartesianGrid
+                      stroke="rgba(148, 163, 184, 0.14)"
+                      strokeDasharray="4 4"
+                    />
+
+                    <XAxis
+                      dataKey="name"
+                      tick={{
+                        fill: "#94a3b8",
+                        fontSize: 11,
+                      }}
+                    />
+
+                    <YAxis
+                      allowDecimals={false}
+                      tick={{
+                        fill: "#94a3b8",
+                        fontSize: 11,
+                      }}
+                    />
+
+                    <Tooltip
+                      contentStyle={{
+                        background: "#07111f",
+                        border: "1px solid rgba(56, 189, 248, 0.32)",
+                        borderRadius: "10px",
+                        color: "#e5f0ff",
+                      }}
+                      formatter={(value) => [value, "Packets"]}
+                    />
+
+                    <Bar
+                      dataKey="value"
+                      fill="var(--blue)"
+                      radius={[8, 8, 0, 0]}
+                    />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            )}
           </div>
         </div>
 
