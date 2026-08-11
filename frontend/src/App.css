@@ -6077,3 +6077,64 @@ a {
     grid-template-columns: 1fr;
   }
 }
+
+/* Packet Analytics Charts */
+
+.dashboardPage .packetChartsGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px;
+  margin: 22px 0;
+}
+
+.dashboardPage .packetChartCard {
+  min-width: 0;
+  padding: 20px;
+  border: 1px solid var(--border-blue);
+  border-radius: 16px;
+  background: rgba(7, 17, 31, 0.84);
+  box-shadow: var(--glow);
+}
+
+.dashboardPage .packetChartHeader span {
+  color: var(--blue);
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.dashboardPage .packetChartHeader h3 {
+  margin: 6px 0;
+  color: var(--white);
+}
+
+.dashboardPage .packetChartHeader p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.dashboardPage .packetChartCanvas {
+  width: 100%;
+  height: 250px;
+  margin-top: 12px;
+}
+
+.dashboardPage .packetChartEmpty {
+  display: grid;
+  min-height: 250px;
+  place-items: center;
+  color: var(--muted);
+  text-align: center;
+}
+
+@media (max-width: 900px) {
+  .dashboardPage .packetChartsGrid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.dashboardPage .packetChartWide {
+  grid-column: 1 / -1;
+}
