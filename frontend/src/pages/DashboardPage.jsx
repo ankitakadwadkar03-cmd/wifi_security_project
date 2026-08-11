@@ -152,6 +152,30 @@ export default function DashboardPage({ setCurrentPage }) {
     }
   }
 
+  async function loadThreats() {
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/api/threats`
+      );
+
+      if (!response.ok) {
+        throw new Error(
+          `Threats endpoint returned HTTP ${response.status}`
+        );
+      }
+
+      const data = await response.json();
+
+      setThreats(
+        Array.isArray(data.threats)
+          ? data.threats
+          : []
+      );
+    } catch (threatError) {
+      console.error("Live threats error:", threatError);
+    }
+  }
+
   async function loadPackets() {
     try {
       const response = await fetch(
@@ -270,6 +294,7 @@ export default function DashboardPage({ setCurrentPage }) {
       loadScannerStatus();
       loadCaptureStatus();
       loadPackets();
+      loadThreats();
     }, 2000);
 
     return () => {
