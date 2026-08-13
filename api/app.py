@@ -45,6 +45,16 @@ SCANNER_SERVICE_INTERFACE = "wlan0"
 CAPTURE_SERVICE_NAME = "netshield-capture.service"
 CAPTURE_SERVICE_INTERFACE = "wlan0"
 PACKET_LOG_CSV = PROJECT_ROOT / "packet_logs" / "wifi_packets.csv"
+LIVE_PACKET_ALERT_HISTORY_JSON = (
+    PROJECT_ROOT
+    / "security_reports"
+    / "live_packet_alert_history.json"
+)
+LIVE_PACKET_ALERT_HISTORY_LOG = (
+    PROJECT_ROOT
+    / "security_reports"
+    / "live_packet_alert_history.log"
+)
 
 
 def _normalize_bssid(value: str | None) -> str:
@@ -228,11 +238,14 @@ def read_packet_alerts() -> list[dict]:
             return None
 
     latest_seconds = None
+    latest_timestamp = ""
 
     for packet in packets:
-        latest_seconds = timestamp_seconds(packet.get("timestamp", ""))
+        packet_timestamp = packet.get("timestamp", "")
+        latest_seconds = timestamp_seconds(packet_timestamp)
 
         if latest_seconds is not None:
+            latest_timestamp = packet_timestamp
             break
 
     if latest_seconds is None:
@@ -393,6 +406,7 @@ def read_packet_alerts() -> list[dict]:
         alert.setdefault("ssid", "Live Packet Activity")
         alert.setdefault("encryption", "Not applicable")
         alert.setdefault("attack_type", alert_type)
+        alert.setdefault("evidence_timestamp", latest_timestamp)
         alert.setdefault(
             "total_packets",
             alert_counts.get(alert_type, 0),
@@ -421,6 +435,181 @@ def read_packet_alerts() -> list[dict]:
     )
 
     return alerts
+
+
+def read_packet_alert_history(limit: int = 100) -> list[dict]:
+    """Read saved live packet-alert history, newest first."""
+    if not LIVE_PACKET_ALERT_HISTORY_JSON.exists():
+        return []
+
+    try:
+        payload = json.loads(
+            LIVE_PACKET_ALERT_HISTORY_JSON.read_text(
+                encoding="utf-8"
+            )
+        )
+    except (OSError, json.JSONDecodeError):
+        return []
+
+    history = payload.get("alerts", [])
+
+    if not isinstance(history, list):
+        return []
+
+    safe_limit = max(1, min(limit, 200))
+
+    return list(reversed(history[-safe_limit:]))
+
+
+def save_packet_alert_history(alerts: list[dict]) -> list[dict]:
+    """Persist packet alerts while avoiding polling duplicates."""
+    if not alerts:
+        return read_packet_alert_history()
+
+    LIVE_PACKET_ALERT_HISTORY_JSON.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    existing_history = read_packet_alert_history(limit=200)
+    history = list(reversed(existing_history))
+
+    now = datetime.now()
+    now_text = now.strftime("%Y-%m-%d %H:%M:%S")
+
+    new_log_entries: list[dict] = []
+
+    for alert in alerts:
+        alert_type = str(
+            alert.get("alert_type")
+            or alert.get("attack_type")
+            or "PACKET_ACTIVITY"
+        )
+
+        bssid = str(
+            alert.get("bssid") or "Unknown"
+        )
+
+        matching_event = None
+
+        for event in reversed(history):
+            if (
+                event.get("alert_type") == alert_type
+                and event.get("bssid") == bssid
+            ):
+                last_seen_text = (
+                    event.get("last_seen")
+                    or event.get("recorded_at")
+                    or ""
+                )
+
+                try:
+                    last_seen = datetime.strptime(
+                        last_seen_text,
+                        "%Y-%m-%d %H:%M:%S",
+                    )
+                except (TypeError, ValueError):
+                    continue
+
+                if (now - last_seen).total_seconds() <= 30:
+                    matching_event = event
+
+                break
+
+        if matching_event is not None:
+            matching_event.update(
+                {
+                    "last_seen": now_text,
+                    "evidence_timestamp": alert.get(
+                        "evidence_timestamp", ""
+                    ),
+                    "severity": alert.get(
+                        "severity", "Low"
+                    ),
+                    "title": alert.get(
+                        "title", "Packet Security Alert"
+                    ),
+                    "ssid": alert.get(
+                        "ssid", "Live Packet Activity"
+                    ),
+                    "summary": alert.get(
+                        "summary", ""
+                    ),
+                    "total_packets": alert.get(
+                        "total_packets", 0
+                    ),
+                    "risk_level": alert.get(
+                        "risk_level", "REVIEW"
+                    ),
+                }
+            )
+
+            continue
+
+        history_event = {
+            "recorded_at": now_text,
+            "last_seen": now_text,
+            "evidence_timestamp": alert.get(
+                "evidence_timestamp", ""
+            ),
+            "severity": alert.get("severity", "Low"),
+            "title": alert.get(
+                "title", "Packet Security Alert"
+            ),
+            "ssid": alert.get(
+                "ssid", "Live Packet Activity"
+            ),
+            "bssid": bssid,
+            "attack_type": alert.get(
+                "attack_type", alert_type
+            ),
+            "alert_type": alert_type,
+            "total_packets": alert.get(
+                "total_packets", 0
+            ),
+            "risk_level": alert.get(
+                "risk_level", "REVIEW"
+            ),
+            "summary": alert.get("summary", ""),
+            "source": "live_packet_analysis",
+        }
+
+        history.append(history_event)
+        new_log_entries.append(history_event)
+
+    history = history[-200:]
+
+    payload = {
+        "updated_at": now_text,
+        "count": len(history),
+        "alerts": history,
+    }
+
+    LIVE_PACKET_ALERT_HISTORY_JSON.write_text(
+        json.dumps(
+            payload,
+            indent=2,
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    if new_log_entries:
+        with LIVE_PACKET_ALERT_HISTORY_LOG.open(
+            "a",
+            encoding="utf-8",
+        ) as log_file:
+            for event in new_log_entries:
+                log_file.write(
+                    f"{event['recorded_at']} | "
+                    f"Severity={event['severity']} | "
+                    f"Type={event['alert_type']} | "
+                    f"BSSID={event['bssid']} | "
+                    f"Packets={event['total_packets']} | "
+                    f"Summary={event['summary']}\n"
+                )
+
+    return list(reversed(history))
 
 
 def read_threats() -> list[dict]:
@@ -1342,9 +1531,32 @@ def packets():
     )
 
 
+@app.get("/api/alerts/history")
+def alert_history():
+    limit = request.args.get(
+        "limit",
+        default=50,
+        type=int,
+    )
+
+    history_rows = read_packet_alert_history(limit=limit)
+
+    return jsonify(
+        {
+            "count": len(history_rows),
+            "source": "live_packet_alert_history.json",
+            "alerts": history_rows,
+        }
+    )
+
+
 @app.get("/api/threats")
 def threats():
     live_alerts = read_packet_alerts()
+
+    if live_alerts:
+        save_packet_alert_history(live_alerts)
+
     report_findings = read_threats()
 
     threat_rows = live_alerts + report_findings

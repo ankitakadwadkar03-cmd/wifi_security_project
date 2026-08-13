@@ -13,6 +13,8 @@ function formatAttackType(value) {
 
 export default function ThreatCenterPage() {
   const [threats, setThreats] = useState([]);
+  const [alertHistory, setAlertHistory] = useState([]);
+  const [historyLoading, setHistoryLoading] = useState(true);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
@@ -51,10 +53,52 @@ export default function ThreatCenterPage() {
       }
     }
 
+    async function loadAlertHistory(showLoading = false) {
+      try {
+        if (showLoading) {
+          setHistoryLoading(true);
+        }
+
+        const response = await fetch(
+          `${API_BASE_URL}/api/alerts/history?limit=20`,
+          {
+            signal: controller.signal,
+          }
+        );
+
+        if (!response.ok) {
+          throw new Error(
+            `Alert history endpoint returned HTTP ${response.status}`
+          );
+        }
+
+        const data = await response.json();
+
+        setAlertHistory(
+          Array.isArray(data.alerts)
+            ? data.alerts
+            : []
+        );
+      } catch (fetchError) {
+        if (fetchError.name !== "AbortError") {
+          console.error(
+            "Failed to load alert history:",
+            fetchError
+          );
+        }
+      } finally {
+        if (showLoading) {
+          setHistoryLoading(false);
+        }
+      }
+    }
+
     loadThreats(true);
+    loadAlertHistory(true);
 
     const pollingTimer = window.setInterval(() => {
       loadThreats(false);
+      loadAlertHistory(false);
     }, 2000);
 
     return () => {
@@ -173,6 +217,86 @@ export default function ThreatCenterPage() {
           </div>
         </>
       )}
+
+      <div className="alertHistorySection">
+        <div className="threatSummaryBar">
+          <div>
+            <span>Recent Alert Evidence</span>
+            <strong>{alertHistory.length}</strong>
+          </div>
+
+          <p>
+            Saved live packet alerts remain available for later review even
+            after the activity is no longer currently detected.
+          </p>
+        </div>
+
+        {historyLoading && (
+          <div className="networkTableMessage">
+            Loading alert evidence...
+          </div>
+        )}
+
+        {!historyLoading && alertHistory.length === 0 && (
+          <div className="networkTableMessage">
+            No live packet alert evidence has been recorded yet.
+          </div>
+        )}
+
+        {!historyLoading && alertHistory.length > 0 && (
+          <div className="threatGrid">
+            {alertHistory.map((item) => (
+              <div
+                className="threatCard"
+                key={`${item.recorded_at}-${item.alert_type}-${item.bssid}`}
+              >
+                <div className="threatTop">
+                  <StatusBadge value={item.severity} />
+                </div>
+
+                <h2>{item.title}</h2>
+                <p>{item.summary}</p>
+
+                <div className="threatDetails">
+                  <div>
+                    <span>Recorded At</span>
+                    <strong>{item.recorded_at || "Unknown"}</strong>
+                  </div>
+
+                  <div>
+                    <span>Last Seen</span>
+                    <strong>{item.last_seen || "Unknown"}</strong>
+                  </div>
+
+                  <div>
+                    <span>Source / BSSID</span>
+                    <strong>{item.bssid || "Unknown"}</strong>
+                  </div>
+
+                  <div>
+                    <span>Classification</span>
+                    <strong>
+                      {formatAttackType(item.alert_type)}
+                    </strong>
+                  </div>
+
+                  <div>
+                    <span>Packets Observed</span>
+                    <strong>{item.total_packets ?? 0}</strong>
+                  </div>
+
+                  <div>
+                    <span>Evidence Time</span>
+                    <strong>
+                      {item.evidence_timestamp || "Unknown"}
+                    </strong>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
 
       <div className="securityTips">
         <h2>Best Practices</h2>
