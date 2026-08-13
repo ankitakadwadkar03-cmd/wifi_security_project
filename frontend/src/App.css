@@ -6138,3 +6138,36 @@ a {
 .dashboardPage .packetChartWide {
   grid-column: 1 / -1;
 }
+
+
+/* Alert evidence export controls */
+
+.alertEvidenceActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: -4px 0 18px;
+}
+
+.alertEvidenceActions a {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 40px;
+  padding: 9px 16px;
+  border: 1px solid rgba(0, 200, 255, 0.42);
+  border-radius: 8px;
+  background: rgba(0, 200, 255, 0.1);
+  color: #e4f8ff;
+  font-size: 12px;
+  font-weight: 900;
+  text-decoration: none;
+  transition: 0.2s ease;
+}
+
+.alertEvidenceActions a:hover {
+  transform: translateY(-2px);
+  border-color: var(--soc-cyan);
+  background: rgba(0, 200, 255, 0.18);
+  box-shadow: 0 0 22px rgba(0, 200, 255, 0.14);
+}

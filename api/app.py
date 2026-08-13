@@ -748,6 +748,10 @@ def _report_description(filename: str) -> str:
             "Readable alert-notification log.",
         "live_alerts.log":
             "Live security-monitoring alert log.",
+        "live_packet_alert_history.json":
+            "Structured history and evidence for detected live packet alerts.",
+        "live_packet_alert_history.log":
+            "Readable evidence log for detected live packet alerts.",
         "email_alert_preview.json":
             "Structured preview of generated email alerts.",
         "email_alert_preview.txt":

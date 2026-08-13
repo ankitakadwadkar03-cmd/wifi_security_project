@@ -231,6 +231,24 @@ export default function ThreatCenterPage() {
           </p>
         </div>
 
+        {alertHistory.length > 0 && (
+          <div className="alertEvidenceActions">
+            <a
+              href={`${API_BASE_URL}/api/reports/download/live_packet_alert_history.json`}
+              download
+            >
+              Export JSON
+            </a>
+
+            <a
+              href={`${API_BASE_URL}/api/reports/download/live_packet_alert_history.log`}
+              download
+            >
+              Export Log
+            </a>
+          </div>
+        )}
+
         {historyLoading && (
           <div className="networkTableMessage">
             Loading alert evidence...
