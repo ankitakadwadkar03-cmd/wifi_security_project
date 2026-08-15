@@ -34,6 +34,7 @@ CORS(
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 NETWORK_CSV = PROJECT_ROOT / "scan_results" / "wifi_scan_results.csv"
+SCANNER_STATUS_JSON = PROJECT_ROOT / "scan_results" / "scanner_status.json"
 SECURITY_REPORT_CSV = PROJECT_ROOT / "security_reports" / "final_security_report.csv"
 REPORTS_DIRECTORY = PROJECT_ROOT / "security_reports"
 HISTORY_DB = PROJECT_ROOT / "security_reports" / "history.db"
@@ -935,6 +936,114 @@ def read_history() -> dict:
     }
 
 
+def _read_interface_capabilities(interface: str) -> dict:
+    """Read supported WiFi bands and enabled channels for an interface."""
+    capabilities = {
+        "phy": None,
+        "bands": [],
+        "enabled_channels": [],
+        "disabled_channels": [],
+        "supports_2_4_ghz": False,
+        "supports_5_ghz": False,
+    }
+
+    try:
+        interface_result = subprocess.run(
+            ["iw", "dev", interface, "info"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return capabilities
+
+    if interface_result.returncode != 0:
+        return capabilities
+
+    phy_name = None
+
+    for raw_line in interface_result.stdout.splitlines():
+        line = raw_line.strip()
+
+        if line.startswith("wiphy "):
+            phy_number = line.split(" ", 1)[1].strip()
+            phy_name = f"phy{phy_number}"
+            break
+
+    if not phy_name:
+        return capabilities
+
+    capabilities["phy"] = phy_name
+
+    try:
+        phy_result = subprocess.run(
+            ["iw", "phy", phy_name, "info"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return capabilities
+
+    if phy_result.returncode != 0:
+        return capabilities
+
+    bands = set()
+    enabled_channels = []
+    disabled_channels = []
+
+    for raw_line in phy_result.stdout.splitlines():
+        line = raw_line.strip()
+
+        if "MHz [" not in line:
+            continue
+
+        try:
+            frequency_text = (
+                line.split("MHz", 1)[0]
+                .replace("*", "")
+                .strip()
+            )
+
+            frequency = float(frequency_text)
+
+            channel = int(
+                line.split("[", 1)[1]
+                .split("]", 1)[0]
+                .strip()
+            )
+        except (IndexError, ValueError):
+            continue
+
+        if 2300 <= frequency < 3000:
+            band = "2.4 GHz"
+        elif 4900 <= frequency < 5925:
+            band = "5 GHz"
+        elif 5925 <= frequency <= 7125:
+            band = "6 GHz"
+        else:
+            band = "Other"
+
+        bands.add(band)
+
+        if "(disabled)" in line.lower():
+            if channel not in disabled_channels:
+                disabled_channels.append(channel)
+        else:
+            if channel not in enabled_channels:
+                enabled_channels.append(channel)
+
+    capabilities["bands"] = sorted(bands)
+    capabilities["enabled_channels"] = enabled_channels
+    capabilities["disabled_channels"] = disabled_channels
+    capabilities["supports_2_4_ghz"] = "2.4 GHz" in bands
+    capabilities["supports_5_ghz"] = "5 GHz" in bands
+
+    return capabilities
+
+
 def read_adapter_status() -> dict:
     """Detect available Linux wireless interfaces using the iw command."""
     if shutil.which("iw") is None:
@@ -985,13 +1094,27 @@ def read_adapter_status() -> dict:
             current_interface = {
                 "name": line.split(" ", 1)[1].strip(),
                 "mode": "unknown",
+                "channel": None,
             }
 
         elif line.startswith("type ") and current_interface:
             current_interface["mode"] = line.split(" ", 1)[1].strip()
 
+        elif line.startswith("channel ") and current_interface:
+            try:
+                current_interface["channel"] = int(
+                    line.split()[1]
+                )
+            except (IndexError, ValueError):
+                current_interface["channel"] = None
+
     if current_interface:
         interfaces.append(current_interface)
+
+    for interface in interfaces:
+        interface["capabilities"] = _read_interface_capabilities(
+            interface["name"]
+        )
 
     if not interfaces:
         return {
@@ -1089,6 +1212,42 @@ def _read_scanner_service_pid() -> int | None:
     return process_id if process_id > 0 else None
 
 
+def read_scanner_progress() -> dict:
+    """Read runtime WiFi scanner sweep progress."""
+    empty_progress = {
+        "state": "idle",
+        "interface": None,
+        "sweep_number": 0,
+        "current_channel": None,
+        "channels_completed": 0,
+        "total_channels": 0,
+        "enabled_channels": [],
+        "session_network_count": 0,
+        "last_sweep_completed_at": None,
+        "updated_at": None,
+    }
+
+    if not SCANNER_STATUS_JSON.exists():
+        return empty_progress
+
+    try:
+        payload = json.loads(
+            SCANNER_STATUS_JSON.read_text(
+                encoding="utf-8"
+            )
+        )
+    except (OSError, json.JSONDecodeError):
+        return empty_progress
+
+    if not isinstance(payload, dict):
+        return empty_progress
+
+    return {
+        **empty_progress,
+        **payload,
+    }
+
+
 def read_scanner_status() -> dict:
     """Return protected scanner-service and adapter status."""
     service_state, service_error = _read_scanner_service_state()
@@ -1109,6 +1268,12 @@ def read_scanner_status() -> dict:
         "stopping",
     }
 
+    progress = read_scanner_progress()
+
+    if not running:
+        progress["state"] = "idle"
+        progress["current_channel"] = None
+
     messages = {
         "starting": (
             f"Starting scanner on {SCANNER_SERVICE_INTERFACE}."
@@ -1123,6 +1288,17 @@ def read_scanner_status() -> dict:
         ),
     }
 
+    adapter = read_adapter_status()
+
+    if adapter.get("available"):
+        adapter["state"] = {
+            "starting": "starting",
+            "running": "scanning",
+            "stopping": "stopping",
+            "idle": "idle",
+            "error": "error",
+        }.get(scanner_state, adapter.get("state"))
+
     return {
         "state": scanner_state,
         "running": running,
@@ -1136,7 +1312,8 @@ def read_scanner_status() -> dict:
         "stopped_at": None,
         "last_error": service_error,
         "message": messages[scanner_state],
-        "adapter": read_adapter_status(),
+        "adapter": adapter,
+        "progress": progress,
     }
 
 
@@ -1507,10 +1684,33 @@ def health():
 def networks():
     network_rows = read_networks()
 
+    updated_at = None
+    age_seconds = None
+
+    if NETWORK_CSV.exists():
+        modified_time = datetime.fromtimestamp(
+            NETWORK_CSV.stat().st_mtime,
+            tz=timezone.utc,
+        )
+
+        updated_at = modified_time.isoformat()
+        age_seconds = max(
+            0,
+            round(
+                (
+                    datetime.now(timezone.utc)
+                    - modified_time
+                ).total_seconds(),
+                1,
+            ),
+        )
+
     return jsonify(
         {
             "count": len(network_rows),
             "source": "wifi_scan_results.csv",
+            "updated_at": updated_at,
+            "age_seconds": age_seconds,
             "networks": network_rows,
         }
     )

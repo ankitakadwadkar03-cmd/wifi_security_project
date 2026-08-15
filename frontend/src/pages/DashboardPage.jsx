@@ -46,6 +46,8 @@ const EMPTY_CAPTURE_STATUS = {
 
 export default function DashboardPage({ setCurrentPage }) {
   const [networks, setNetworks] = useState([]);
+  const [networkUpdatedAt, setNetworkUpdatedAt] = useState(null);
+  const [networkAgeSeconds, setNetworkAgeSeconds] = useState(null);
   const [threats, setThreats] = useState([]);
   const [packets, setPackets] = useState([]);
   const [packetsLoading, setPacketsLoading] = useState(true);
@@ -92,6 +94,8 @@ export default function DashboardPage({ setCurrentPage }) {
 
         return interfaces[0]?.name || "";
       });
+
+      return data;
     } catch (statusError) {
       console.error("Scanner status error:", statusError);
 
@@ -100,6 +104,8 @@ export default function DashboardPage({ setCurrentPage }) {
         state: "error",
         message: "Unable to read scanner status.",
       });
+
+      return null;
     }
   }
 
@@ -146,6 +152,13 @@ export default function DashboardPage({ setCurrentPage }) {
         Array.isArray(data.networks)
           ? data.networks
           : []
+      );
+
+      setNetworkUpdatedAt(data.updated_at || null);
+      setNetworkAgeSeconds(
+        Number.isFinite(Number(data.age_seconds))
+          ? Number(data.age_seconds)
+          : null
       );
     } catch (networkError) {
       console.error("Recent networks error:", networkError);
@@ -260,6 +273,13 @@ export default function DashboardPage({ setCurrentPage }) {
             : []
         );
 
+        setNetworkUpdatedAt(networkData.updated_at || null);
+        setNetworkAgeSeconds(
+          Number.isFinite(Number(networkData.age_seconds))
+            ? Number(networkData.age_seconds)
+            : null
+        );
+
         setThreats(
           Array.isArray(threatData.threats)
             ? threatData.threats
@@ -290,11 +310,16 @@ export default function DashboardPage({ setCurrentPage }) {
     loadScannerStatus();
     loadCaptureStatus();
 
-    const pollingTimer = window.setInterval(() => {
-      loadScannerStatus();
+    const pollingTimer = window.setInterval(async () => {
+      const currentScannerStatus = await loadScannerStatus();
+
       loadCaptureStatus();
       loadPackets();
       loadThreats();
+
+      if (currentScannerStatus?.running) {
+        loadNetworks();
+      }
     }, 2000);
 
     return () => {
@@ -419,6 +444,15 @@ export default function DashboardPage({ setCurrentPage }) {
   const recentNetworks = networks.slice(0, 5);
   const latestThreat = threats[0];
 
+  const networkFreshness =
+    networkAgeSeconds === null
+      ? "No scan timestamp available"
+      : networkAgeSeconds < 60
+        ? `Updated ${Math.round(networkAgeSeconds)}s ago`
+        : networkAgeSeconds < 3600
+          ? `Updated ${Math.round(networkAgeSeconds / 60)}m ago`
+          : `Updated ${Math.round(networkAgeSeconds / 3600)}h ago`;
+
   const securityScore = latestHistory
     ? `${Number(
         latestHistory.average_security_score
@@ -432,6 +466,37 @@ export default function DashboardPage({ setCurrentPage }) {
 
   const scannerRunning = Boolean(scannerStatus.running);
   const captureRunning = Boolean(captureStatus.running);
+
+  const scannerInterfaceDetails =
+    interfaces.find(
+      (item) => item.name === selectedInterface
+    ) ||
+    interfaces[0] ||
+    null;
+
+  const scannerCapabilities =
+    scannerInterfaceDetails?.capabilities || {};
+
+  const scannerProgress = scannerStatus.progress || {
+    sweep_number: 0,
+    current_channel: null,
+    channels_completed: 0,
+    total_channels: 0,
+    session_network_count: 0,
+    last_sweep_completed_at: null,
+  };
+
+  const scannerBands =
+    Array.isArray(scannerCapabilities.bands) &&
+    scannerCapabilities.bands.length > 0
+      ? scannerCapabilities.bands.join(", ")
+      : "Unknown";
+
+  const scannerChannels =
+    Array.isArray(scannerCapabilities.enabled_channels) &&
+    scannerCapabilities.enabled_channels.length > 0
+      ? scannerCapabilities.enabled_channels.join(", ")
+      : "Unknown";
 
   const canStartScanner =
     adapter.available &&
@@ -619,7 +684,11 @@ export default function DashboardPage({ setCurrentPage }) {
         <div className="metricCard">
           <span>Networks Monitored</span>
           <strong>{loading ? "..." : networks.length}</strong>
-          <p>Latest wireless scanner results</p>
+          <p>
+            {networkUpdatedAt
+              ? networkFreshness
+              : "No scanner results available"}
+          </p>
         </div>
 
         <div className="metricCard danger">
@@ -700,6 +769,85 @@ export default function DashboardPage({ setCurrentPage }) {
                 : "No active process"}
             </strong>
             <p>{scannerStatus.message}</p>
+          </div>
+        </div>
+
+        <div className="scannerControlGrid scannerDiagnosticsGrid">
+          <div className="scannerInfoItem">
+            <span>Supported Band</span>
+            <strong>{scannerBands}</strong>
+            <p>
+              {scannerCapabilities.supports_5_ghz
+                ? "This adapter can scan supported 2.4 GHz and 5 GHz channels."
+                : scannerCapabilities.supports_2_4_ghz
+                  ? "This adapter currently provides 2.4 GHz coverage only."
+                  : "Wireless band capability could not be determined."}
+            </p>
+          </div>
+
+          <div className="scannerInfoItem">
+            <span>Enabled Channels</span>
+            <strong>{scannerChannels}</strong>
+            <p>
+              NetShield uses channels reported as enabled by Linux.
+            </p>
+          </div>
+
+          <div className="scannerInfoItem">
+            <span>Current Channel</span>
+            <strong>
+              {scannerProgress.current_channel ??
+                scannerInterfaceDetails?.channel ??
+                "Not tuned"}
+            </strong>
+            <p>
+              {scannerRunning
+                ? "The channel changes automatically during scanning."
+                : "A channel is selected when monitor-mode scanning begins."}
+            </p>
+          </div>
+
+          <div className="scannerInfoItem">
+            <span>Sweep Progress</span>
+            <strong>
+              {scannerRunning
+                ? `${scannerProgress.channels_completed || 0} / ${
+                    scannerProgress.total_channels || scannerCapabilities.enabled_channels?.length || 0
+                  } channels`
+                : "Scanner idle"}
+            </strong>
+            <p>
+              {scannerRunning
+                ? `Sweep ${scannerProgress.sweep_number || 1}`
+                : "Start scanning to view live sweep progress."}
+            </p>
+          </div>
+
+          <div className="scannerInfoItem">
+            <span>Session Networks</span>
+            <strong>
+              {scannerRunning
+                ? scannerProgress.session_network_count || 0
+                : networks.length}
+            </strong>
+            <p>
+              {scannerRunning
+                ? "Unique access points observed during this scanner session."
+                : "Latest saved scanner-result count."}
+            </p>
+          </div>
+
+          <div className="scannerInfoItem">
+            <span>Last Completed Sweep</span>
+            <strong>
+              {scannerProgress.last_sweep_completed_at ||
+                "Not completed yet"}
+            </strong>
+            <p>
+              {scannerRunning
+                ? "Updated after NetShield completes all enabled channels."
+                : "No active channel sweep."}
+            </p>
           </div>
         </div>
 
