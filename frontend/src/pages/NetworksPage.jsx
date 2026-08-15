@@ -30,15 +30,20 @@ function getSignalClass(signal) {
 export default function NetworksPage() {
   const [query, setQuery] = useState("");
   const [networkRows, setNetworkRows] = useState([]);
+  const [networkUpdatedAt, setNetworkUpdatedAt] = useState(null);
+  const [networkAgeSeconds, setNetworkAgeSeconds] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
   useEffect(() => {
     const controller = new AbortController();
 
-    async function loadNetworks() {
+    async function loadNetworks(showLoading = false) {
       try {
-        setLoading(true);
+        if (showLoading) {
+          setLoading(true);
+        }
+
         setError("");
 
         const response = await fetch(`${API_BASE_URL}/api/networks`, {
@@ -50,7 +55,17 @@ export default function NetworksPage() {
         }
 
         const data = await response.json();
-        setNetworkRows(Array.isArray(data.networks) ? data.networks : []);
+
+        setNetworkRows(
+          Array.isArray(data.networks) ? data.networks : []
+        );
+
+        setNetworkUpdatedAt(data.updated_at || null);
+        setNetworkAgeSeconds(
+          Number.isFinite(Number(data.age_seconds))
+            ? Number(data.age_seconds)
+            : null
+        );
       } catch (fetchError) {
         if (fetchError.name !== "AbortError") {
           console.error("Failed to load networks:", fetchError);
@@ -59,14 +74,68 @@ export default function NetworksPage() {
           );
         }
       } finally {
-        setLoading(false);
+        if (showLoading) {
+          setLoading(false);
+        }
       }
     }
 
-    loadNetworks();
+    async function loadScannerStatus() {
+      try {
+        const response = await fetch(
+          `${API_BASE_URL}/api/scanner/status`,
+          {
+            signal: controller.signal,
+          }
+        );
 
-    return () => controller.abort();
+        if (!response.ok) {
+          return null;
+        }
+
+        return await response.json();
+      } catch (fetchError) {
+        if (fetchError.name !== "AbortError") {
+          console.error(
+            "Failed to load scanner status:",
+            fetchError
+          );
+        }
+
+        return null;
+      }
+    }
+
+    loadNetworks(true);
+
+    let scannerWasRunning = false;
+
+    const pollingTimer = window.setInterval(async () => {
+      const scannerStatus = await loadScannerStatus();
+
+      if (scannerStatus?.running) {
+        scannerWasRunning = true;
+        loadNetworks(false);
+      } else if (scannerWasRunning) {
+        scannerWasRunning = false;
+        loadNetworks(false);
+      }
+    }, 2000);
+
+    return () => {
+      controller.abort();
+      window.clearInterval(pollingTimer);
+    };
   }, []);
+
+  const networkFreshness =
+    networkAgeSeconds === null
+      ? "No scan timestamp available"
+      : networkAgeSeconds < 60
+        ? `Updated ${Math.round(networkAgeSeconds)}s ago`
+        : networkAgeSeconds < 3600
+          ? `Updated ${Math.round(networkAgeSeconds / 60)}m ago`
+          : `Updated ${Math.round(networkAgeSeconds / 3600)}h ago`;
 
   const filteredRows = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
@@ -153,6 +222,16 @@ export default function NetworksPage() {
           including SSID, BSSID, signal strength, channel, frequency and
           encryption.
         </p>
+      </div>
+
+      <div className="networkFreshnessBar">
+        <span>Scanner Results</span>
+        <strong>
+          {networkUpdatedAt
+            ? networkFreshness
+            : "No scanner results available"}
+        </strong>
+        <p>{networkRows.length} networks currently stored</p>
       </div>
 
       <div className="toolbar">

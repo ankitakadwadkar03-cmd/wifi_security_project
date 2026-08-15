@@ -7,6 +7,7 @@ Run with root privileges on a wireless adapter that supports monitor mode:
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 import signal
 import subprocess
@@ -21,9 +22,8 @@ from csv_logger import save_to_csv
 from network_parser import extract_network_details
 
 
-SCAN_INTERVAL_SECONDS = 5
 DEFAULT_CSV_PATH = Path("scan_results/wifi_scan_results.csv")
-CHANNELS_2GHZ = list(range(1, 14))
+DEFAULT_CHANNELS_2GHZ = list(range(1, 12))
 CHANNEL_DWELL_SECONDS = 1.5
 
 def _run_command(command: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -34,9 +34,86 @@ def _run_command(command: list[str], check: bool = True) -> subprocess.Completed
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-def set_channel(interface: str, channel: int) -> None:
-    """Switch the wireless interface to a specific WiFi channel."""
-    _run_command(["iwconfig", interface, "channel", str(channel)], check=False)
+def set_channel(interface: str, channel: int) -> bool:
+    """Switch the wireless interface to a WiFi channel."""
+    result = _run_command(
+        ["iwconfig", interface, "channel", str(channel)],
+        check=False,
+    )
+
+    if result.returncode != 0:
+        error_message = (
+            result.stderr.strip()
+            or result.stdout.strip()
+            or "unknown channel-switch error"
+        )
+
+        print(
+            f"Warning: unable to switch {interface} "
+            f"to channel {channel}: {error_message}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return False
+
+    return True
+
+
+def get_enabled_channels(interface: str) -> list[int]:
+    """Return enabled WiFi channels reported by Linux for this adapter."""
+    try:
+        interface_info = _run_command(
+            ["iw", "dev", interface, "info"]
+        )
+    except subprocess.CalledProcessError:
+        return DEFAULT_CHANNELS_2GHZ.copy()
+
+    phy_name = None
+
+    for raw_line in interface_info.stdout.splitlines():
+        line = raw_line.strip()
+
+        if line.startswith("wiphy "):
+            phy_number = line.split(" ", 1)[1].strip()
+            phy_name = f"phy{phy_number}"
+            break
+
+    if not phy_name:
+        return DEFAULT_CHANNELS_2GHZ.copy()
+
+    try:
+        phy_info = _run_command(
+            ["iw", "phy", phy_name, "info"]
+        )
+    except subprocess.CalledProcessError:
+        return DEFAULT_CHANNELS_2GHZ.copy()
+
+    channels: list[int] = []
+
+    for raw_line in phy_info.stdout.splitlines():
+        line = raw_line.strip()
+
+        if "MHz [" not in line:
+            continue
+
+        if "(disabled)" in line.lower():
+            continue
+
+        try:
+            channel_text = (
+                line.split("[", 1)[1]
+                .split("]", 1)[0]
+                .strip()
+            )
+            channel = int(channel_text)
+        except (IndexError, ValueError):
+            continue
+
+        if channel not in channels:
+            channels.append(channel)
+
+    return channels or DEFAULT_CHANNELS_2GHZ.copy()
+
 
 def _require_command(command_name: str) -> None:
     if shutil.which(command_name) is None:
@@ -46,7 +123,7 @@ def _require_command(command_name: str) -> None:
 def enable_monitor_mode(interface: str) -> str:
     """Enable monitor mode using airmon-ng and return the monitor interface name."""
 
-    for command_name in ("iwconfig", "airmon-ng", "iwlist"):
+    for command_name in ("iwconfig", "airmon-ng", "iw"):
         _require_command(command_name)
 
     try:
@@ -121,12 +198,15 @@ def restore_managed_mode(interface: str) -> None:
 
 def scan_networks(
     interface: str,
-    duration: int = SCAN_INTERVAL_SECONDS,
     stop_check=None,
+    channels: list[int] | None = None,
+    progress_callback=None,
 ) -> dict[str, dict[str, str | int | None]]:
-    """Scan WiFi channels one by one and return discovered access points."""
+    """Scan enabled WiFi channels and return discovered access points."""
 
     networks: dict[str, dict[str, str | int | None]] = {}
+    scan_channels = channels or get_enabled_channels(interface)
+    total_channels = len(scan_channels)
 
     def handle_packet(packet: Any) -> None:
         details = extract_network_details(packet)
@@ -134,11 +214,30 @@ def scan_networks(
             return
         networks[details.bssid] = details.as_dict()
 
-    for channel in CHANNELS_2GHZ:
+    for channel_index, channel in enumerate(
+        scan_channels,
+        start=1,
+    ):
         if stop_check and stop_check():
             break
 
-        set_channel(interface, channel)
+        if not set_channel(interface, channel):
+            if progress_callback:
+                progress_callback(
+                    channel,
+                    channel_index,
+                    total_channels,
+                    set(networks),
+                )
+            continue
+
+        if progress_callback:
+            progress_callback(
+                channel,
+                channel_index - 1,
+                total_channels,
+                set(networks),
+            )
 
         sniffer = AsyncSniffer(
             iface=interface,
@@ -165,10 +264,42 @@ def scan_networks(
             except Exception:
                 pass
 
+        if progress_callback:
+            progress_callback(
+                channel,
+                channel_index,
+                total_channels,
+                set(networks),
+            )
+
         if stop_check and stop_check():
             break
 
     return networks
+
+
+def _write_scanner_status(
+    status_path: Path,
+    **values,
+) -> None:
+    """Atomically save runtime scanner progress for the API."""
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+
+    payload = {
+        "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        **values,
+    }
+
+    temporary_path = status_path.with_suffix(
+        status_path.suffix + ".tmp"
+    )
+
+    temporary_path.write_text(
+        json.dumps(payload, indent=2),
+        encoding="utf-8",
+    )
+
+    temporary_path.replace(status_path)
 
 
 def _merge_networks(
@@ -274,14 +405,91 @@ def main() -> int:
 
         print(f"Scanning on monitor interface: {monitor_interface}")
 
+        scan_channels = get_enabled_channels(monitor_interface)
+        status_path = (
+            Path(args.output).parent
+            / "scanner_status.json"
+        )
+        sweep_number = 0
+        last_sweep_completed_at = None
+
+        _write_scanner_status(
+            status_path,
+            state="scanning",
+            interface=monitor_interface,
+            sweep_number=0,
+            current_channel=None,
+            channels_completed=0,
+            total_channels=len(scan_channels),
+            enabled_channels=scan_channels,
+            session_network_count=0,
+            last_sweep_completed_at=None,
+        )
+
         while not stop_requested:
+            sweep_number += 1
+
+            def update_progress(
+                channel,
+                channels_completed,
+                total_channels,
+                sweep_bssids,
+            ):
+                _write_scanner_status(
+                    status_path,
+                    state="scanning",
+                    interface=monitor_interface,
+                    sweep_number=sweep_number,
+                    current_channel=channel,
+                    channels_completed=channels_completed,
+                    total_channels=total_channels,
+                    enabled_channels=scan_channels,
+                    session_network_count=len(
+                        set(known_networks) | set(sweep_bssids)
+                    ),
+                    last_sweep_completed_at=(
+                        last_sweep_completed_at
+                    ),
+                )
+
             latest_networks = scan_networks(
                 monitor_interface,
-                SCAN_INTERVAL_SECONDS,
                 stop_check=lambda: stop_requested,
+                channels=scan_channels,
+                progress_callback=update_progress,
             )
+
             _merge_networks(known_networks, latest_networks)
             save_to_csv(known_networks, args.output)
+
+            if not stop_requested:
+                last_sweep_completed_at = time.strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                )
+
+            _write_scanner_status(
+                status_path,
+                state=(
+                    "stopping"
+                    if stop_requested
+                    else "scanning"
+                ),
+                interface=monitor_interface,
+                sweep_number=sweep_number,
+                current_channel=None,
+                channels_completed=(
+                    0
+                    if stop_requested
+                    else len(scan_channels)
+                ),
+                total_channels=len(scan_channels),
+                enabled_channels=scan_channels,
+                session_network_count=len(known_networks),
+                last_sweep_completed_at=(
+                    last_sweep_completed_at
+                ),
+            )
+
             _print_table(known_networks)
 
     except PermissionError:
