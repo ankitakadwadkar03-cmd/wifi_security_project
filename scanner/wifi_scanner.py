@@ -119,7 +119,11 @@ def restore_managed_mode(interface: str) -> None:
     )
 
 
-def scan_networks(interface: str, duration: int = SCAN_INTERVAL_SECONDS) -> dict[str, dict[str, str | int | None]]:
+def scan_networks(
+    interface: str,
+    duration: int = SCAN_INTERVAL_SECONDS,
+    stop_check=None,
+) -> dict[str, dict[str, str | int | None]]:
     """Scan WiFi channels one by one and return discovered access points."""
 
     networks: dict[str, dict[str, str | int | None]] = {}
@@ -131,18 +135,38 @@ def scan_networks(interface: str, duration: int = SCAN_INTERVAL_SECONDS) -> dict
         networks[details.bssid] = details.as_dict()
 
     for channel in CHANNELS_2GHZ:
+        if stop_check and stop_check():
+            break
+
         set_channel(interface, channel)
 
-        sniffer = AsyncSniffer(iface=interface, prn=handle_packet, store=False)
+        sniffer = AsyncSniffer(
+            iface=interface,
+            prn=handle_packet,
+            store=False,
+        )
 
         try:
             sniffer.start()
-            time.sleep(CHANNEL_DWELL_SECONDS)
+
+            dwell_deadline = (
+                time.monotonic() + CHANNEL_DWELL_SECONDS
+            )
+
+            while time.monotonic() < dwell_deadline:
+                if stop_check and stop_check():
+                    break
+
+                remaining = dwell_deadline - time.monotonic()
+                time.sleep(min(0.1, max(remaining, 0)))
         finally:
             try:
                 sniffer.stop()
             except Exception:
                 pass
+
+        if stop_check and stop_check():
+            break
 
     return networks
 
@@ -254,6 +278,7 @@ def main() -> int:
             latest_networks = scan_networks(
                 monitor_interface,
                 SCAN_INTERVAL_SECONDS,
+                stop_check=lambda: stop_requested,
             )
             _merge_networks(known_networks, latest_networks)
             save_to_csv(known_networks, args.output)
