@@ -51,6 +51,8 @@ export default function DashboardPage({ setCurrentPage }) {
   const [threats, setThreats] = useState([]);
   const [packets, setPackets] = useState([]);
   const [packetsLoading, setPacketsLoading] = useState(true);
+  const [packetUpdatedAt, setPacketUpdatedAt] = useState(null);
+  const [packetAgeSeconds, setPacketAgeSeconds] = useState(null);
   const [packetTypeFilter, setPacketTypeFilter] = useState("All");
   const [packetMacSearch, setPacketMacSearch] = useState("");
   const [packetSignalFilter, setPacketSignalFilter] = useState("All");
@@ -208,6 +210,14 @@ export default function DashboardPage({ setCurrentPage }) {
           ? data.packets
           : []
       );
+
+      setPacketUpdatedAt(data.updated_at || null);
+      setPacketAgeSeconds(
+        data.age_seconds === null ||
+          data.age_seconds === undefined
+          ? null
+          : Number(data.age_seconds)
+      );
     } catch (packetError) {
       console.error("Recent packets error:", packetError);
     } finally {
@@ -290,6 +300,14 @@ export default function DashboardPage({ setCurrentPage }) {
           Array.isArray(packetData.packets)
             ? packetData.packets
             : []
+        );
+
+        setPacketUpdatedAt(packetData.updated_at || null);
+        setPacketAgeSeconds(
+          packetData.age_seconds === null ||
+            packetData.age_seconds === undefined
+            ? null
+            : Number(packetData.age_seconds)
         );
 
         setLatestHistory(historyData.latest || null);
@@ -444,6 +462,15 @@ export default function DashboardPage({ setCurrentPage }) {
   const recentNetworks = networks.slice(0, 5);
   const latestThreat = threats[0];
 
+  const packetFreshness =
+    packetAgeSeconds === null
+      ? "No packet timestamp available"
+      : packetAgeSeconds < 60
+        ? `Updated ${Math.round(packetAgeSeconds)}s ago`
+        : packetAgeSeconds < 3600
+          ? `Updated ${Math.round(packetAgeSeconds / 60)}m ago`
+          : `Updated ${Math.round(packetAgeSeconds / 3600)}h ago`;
+
   const networkFreshness =
     networkAgeSeconds === null
       ? "No scan timestamp available"
@@ -471,8 +498,16 @@ export default function DashboardPage({ setCurrentPage }) {
     state: "idle",
     interface: null,
     packet_count: 0,
+    packet_rate: 0,
+    elapsed_seconds: 0,
+    packet_type_counts: {},
     started_at: null,
     last_packet_at: null,
+    current_channel: null,
+    channel_index: 0,
+    total_channels: 0,
+    enabled_channels: [],
+    sweep_number: 0,
     updated_at: null,
   };
 
@@ -942,7 +977,11 @@ export default function DashboardPage({ setCurrentPage }) {
                 ? "CSV Available"
                 : "No Capture Yet"}
             </strong>
-            <p>Saved to packet_logs/wifi_packets.csv</p>
+            <p>
+              {packetUpdatedAt
+                ? `${packetFreshness} · packet_logs/wifi_packets.csv`
+                : "Saved to packet_logs/wifi_packets.csv"}
+            </p>
           </div>
 
           <div className="scannerInfoItem">
@@ -960,12 +999,91 @@ export default function DashboardPage({ setCurrentPage }) {
           <div className="scannerInfoItem">
             <span>Current Channel</span>
             <strong>
-              {captureInterfaceDetails?.channel ?? "Not tuned"}
+              {captureProgress.current_channel ??
+                captureInterfaceDetails?.channel ??
+                "Not tuned"}
             </strong>
             <p>
               {captureRunning
-                ? "Channel currently used by the monitor interface."
+                ? "NetShield automatically changes channels during capture."
                 : "A channel is selected when packet capture begins."}
+            </p>
+          </div>
+
+          <div className="scannerInfoItem">
+            <span>Channel Sweep</span>
+            <strong>
+              {captureRunning
+                ? `${captureProgress.channel_index || 0} / ${
+                    captureProgress.total_channels || 0
+                  } channels`
+                : "Capture idle"}
+            </strong>
+            <p>
+              {captureRunning
+                ? `Sweep ${captureProgress.sweep_number || 1}`
+                : "Start capture to view live channel coverage."}
+            </p>
+          </div>
+
+          <div className="scannerInfoItem">
+            <span>Enabled Channels</span>
+            <strong>
+              {captureProgress.enabled_channels?.length
+                ? captureProgress.enabled_channels.join(", ")
+                : captureStatus.adapter?.interfaces?.[0]
+                    ?.capabilities?.enabled_channels?.join(", ") ||
+                  "Unknown"}
+            </strong>
+            <p>
+              Channels available to the current wireless adapter.
+            </p>
+          </div>
+
+          <div className="scannerInfoItem">
+            <span>Packet Rate</span>
+            <strong>
+              {captureRunning
+                ? `${Number(captureProgress.packet_rate || 0).toFixed(2)} pkt/s`
+                : "0.00 pkt/s"}
+            </strong>
+            <p>
+              Average analyzed packets per second in this capture session.
+            </p>
+          </div>
+
+          <div className="scannerInfoItem">
+            <span>Elapsed Time</span>
+            <strong>
+              {captureRunning
+                ? `${Math.round(captureProgress.elapsed_seconds || 0)}s`
+                : captureProgress.elapsed_seconds
+                  ? `${Math.round(captureProgress.elapsed_seconds)}s`
+                  : "0s"}
+            </strong>
+            <p>
+              Duration of the current or most recent capture session.
+            </p>
+          </div>
+
+          <div className="scannerInfoItem">
+            <span>Packet Types</span>
+            <strong>
+              {Object.keys(
+                captureProgress.packet_type_counts || {}
+              ).length
+                ? Object.entries(
+                    captureProgress.packet_type_counts
+                  )
+                    .map(
+                      ([type, count]) =>
+                        `${type}: ${count}`
+                    )
+                    .join(" · ")
+                : "No packets yet"}
+            </strong>
+            <p>
+              Breakdown of packet types analyzed during this session.
             </p>
           </div>
 

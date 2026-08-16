@@ -177,12 +177,20 @@ def _safe_int(value, default=0):
         return default
 
 
-def read_packets(limit: int = 50) -> list[dict]:
-    """Return the most recent packet-capture rows."""
+def read_packets(
+    limit: int = 50,
+    session_start_row: int | None = None,
+) -> list[dict]:
+    """Return recent packet rows, optionally limited to one capture session."""
     if not PACKET_LOG_CSV.exists():
         return []
 
     safe_limit = max(1, min(limit, 500))
+    safe_start_row = (
+        max(0, int(session_start_row))
+        if session_start_row is not None
+        else 0
+    )
     recent_rows = deque(maxlen=safe_limit)
 
     with PACKET_LOG_CSV.open(
@@ -190,7 +198,10 @@ def read_packets(limit: int = 50) -> list[dict]:
     ) as csv_file:
         reader = csv.DictReader(csv_file)
 
-        for row in reader:
+        for row_index, row in enumerate(reader):
+            if row_index < safe_start_row:
+                continue
+
             recent_rows.append(
                 {
                     "timestamp": (
@@ -222,8 +233,18 @@ def read_packets(limit: int = 50) -> list[dict]:
 
 
 def read_packet_alerts() -> list[dict]:
-    """Detect potential security events in the latest captured packets."""
-    packets = read_packets(limit=200)
+    """Detect security events only within the latest capture session."""
+    progress = read_capture_progress()
+
+    session_start_row = _safe_int(
+        progress.get("session_start_row"),
+        default=0,
+    )
+
+    packets = read_packets(
+        limit=200,
+        session_start_row=session_start_row,
+    )
 
     if not packets:
         return []
@@ -1500,8 +1521,17 @@ def read_capture_progress() -> dict:
         "state": "idle",
         "interface": None,
         "packet_count": 0,
+        "session_start_row": 0,
+        "packet_rate": 0.0,
+        "elapsed_seconds": 0.0,
+        "packet_type_counts": {},
         "started_at": None,
         "last_packet_at": None,
+        "current_channel": None,
+        "channel_index": 0,
+        "total_channels": 0,
+        "enabled_channels": [],
+        "sweep_number": 0,
         "updated_at": None,
     }
 
@@ -1551,6 +1581,9 @@ def read_capture_status() -> dict:
 
     if not running:
         progress["state"] = "idle"
+        progress["current_channel"] = None
+        progress["channel_index"] = 0
+        progress["packet_rate"] = 0.0
 
     messages = {
         "starting": (
@@ -1779,10 +1812,33 @@ def packets():
 
     packet_rows = read_packets(limit=limit)
 
+    updated_at = None
+    age_seconds = None
+
+    if PACKET_LOG_CSV.exists():
+        modified_time = datetime.fromtimestamp(
+            PACKET_LOG_CSV.stat().st_mtime,
+            tz=timezone.utc,
+        )
+
+        updated_at = modified_time.isoformat()
+        age_seconds = max(
+            0,
+            round(
+                (
+                    datetime.now(timezone.utc)
+                    - modified_time
+                ).total_seconds(),
+                1,
+            ),
+        )
+
     return jsonify(
         {
             "count": len(packet_rows),
             "source": "wifi_packets.csv",
+            "updated_at": updated_at,
+            "age_seconds": age_seconds,
             "packets": packet_rows,
         }
     )
@@ -1809,7 +1865,13 @@ def alert_history():
 
 @app.get("/api/threats")
 def threats():
-    live_alerts = read_packet_alerts()
+    capture_status = read_capture_status()
+
+    live_alerts = (
+        read_packet_alerts()
+        if capture_status.get("running")
+        else []
+    )
 
     if live_alerts:
         save_packet_alert_history(live_alerts)
