@@ -46,6 +46,7 @@ SCANNER_SERVICE_INTERFACE = "wlan0"
 CAPTURE_SERVICE_NAME = "netshield-capture.service"
 CAPTURE_SERVICE_INTERFACE = "wlan0"
 PACKET_LOG_CSV = PROJECT_ROOT / "packet_logs" / "wifi_packets.csv"
+CAPTURE_STATUS_JSON = PROJECT_ROOT / "packet_logs" / "capture_status.json"
 LIVE_PACKET_ALERT_HISTORY_JSON = (
     PROJECT_ROOT
     / "security_reports"
@@ -1493,6 +1494,38 @@ def _read_capture_service_pid() -> int | None:
     return process_id if process_id > 0 else None
 
 
+def read_capture_progress() -> dict:
+    """Read live packet-capture runtime progress."""
+    empty_progress = {
+        "state": "idle",
+        "interface": None,
+        "packet_count": 0,
+        "started_at": None,
+        "last_packet_at": None,
+        "updated_at": None,
+    }
+
+    if not CAPTURE_STATUS_JSON.exists():
+        return empty_progress
+
+    try:
+        payload = json.loads(
+            CAPTURE_STATUS_JSON.read_text(
+                encoding="utf-8"
+            )
+        )
+    except (OSError, json.JSONDecodeError):
+        return empty_progress
+
+    if not isinstance(payload, dict):
+        return empty_progress
+
+    return {
+        **empty_progress,
+        **payload,
+    }
+
+
 def read_capture_status() -> dict:
     """Return packet-capture service and adapter status."""
     service_state, service_error = _read_capture_service_state()
@@ -1514,6 +1547,11 @@ def read_capture_status() -> dict:
         "stopping",
     }
 
+    progress = read_capture_progress()
+
+    if not running:
+        progress["state"] = "idle"
+
     messages = {
         "starting": (
             f"Starting packet capture on {CAPTURE_SERVICE_INTERFACE}."
@@ -1526,6 +1564,20 @@ def read_capture_status() -> dict:
         "error": "The packet-capture service encountered an error.",
     }
 
+    adapter = read_adapter_status()
+
+    if adapter.get("available"):
+        adapter["state"] = {
+            "starting": "starting",
+            "running": "capturing",
+            "stopping": "stopping",
+            "idle": "idle",
+            "error": "error",
+        }.get(
+            capture_state,
+            adapter.get("state"),
+        )
+
     return {
         "state": capture_state,
         "running": running,
@@ -1537,8 +1589,9 @@ def read_capture_status() -> dict:
         ),
         "last_error": service_error,
         "message": messages[capture_state],
-        "adapter": read_adapter_status(),
+        "adapter": adapter,
         "packet_log_found": PACKET_LOG_CSV.exists(),
+        "progress": progress,
     }
 
 

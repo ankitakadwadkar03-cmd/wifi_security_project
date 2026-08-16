@@ -467,6 +467,18 @@ export default function DashboardPage({ setCurrentPage }) {
   const scannerRunning = Boolean(scannerStatus.running);
   const captureRunning = Boolean(captureStatus.running);
 
+  const captureProgress = captureStatus.progress || {
+    state: "idle",
+    interface: null,
+    packet_count: 0,
+    started_at: null,
+    last_packet_at: null,
+    updated_at: null,
+  };
+
+  const captureInterfaceDetails =
+    captureStatus.adapter?.interfaces?.[0] || null;
+
   const scannerInterfaceDetails =
     interfaces.find(
       (item) => item.name === selectedInterface
@@ -931,6 +943,50 @@ export default function DashboardPage({ setCurrentPage }) {
                 : "No Capture Yet"}
             </strong>
             <p>Saved to packet_logs/wifi_packets.csv</p>
+          </div>
+
+          <div className="scannerInfoItem">
+            <span>Session Packets</span>
+            <strong>
+              {captureRunning
+                ? captureProgress.packet_count || 0
+                : "Capture idle"}
+            </strong>
+            <p>
+              Packets analyzed and logged during the current capture session.
+            </p>
+          </div>
+
+          <div className="scannerInfoItem">
+            <span>Current Channel</span>
+            <strong>
+              {captureInterfaceDetails?.channel ?? "Not tuned"}
+            </strong>
+            <p>
+              {captureRunning
+                ? "Channel currently used by the monitor interface."
+                : "A channel is selected when packet capture begins."}
+            </p>
+          </div>
+
+          <div className="scannerInfoItem">
+            <span>Capture Started</span>
+            <strong>
+              {captureProgress.started_at || "Not started"}
+            </strong>
+            <p>
+              Start time of the current or most recent capture session.
+            </p>
+          </div>
+
+          <div className="scannerInfoItem">
+            <span>Last Packet</span>
+            <strong>
+              {captureProgress.last_packet_at || "No packet yet"}
+            </strong>
+            <p>
+              Most recent packet accepted by the packet analyzer.
+            </p>
           </div>
         </div>
 

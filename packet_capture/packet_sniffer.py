@@ -7,10 +7,12 @@ Run:
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 import signal
 import subprocess
 import sys
+import time
 from collections import deque
 from pathlib import Path
 from typing import Any, Deque
@@ -23,6 +25,7 @@ from packet_logger import PacketCSVLogger
 
 DEFAULT_OUTPUT = Path("packet_logs/wifi_packets.csv")
 MAX_VISIBLE_ROWS = 20
+STATUS_WRITE_INTERVAL_SECONDS = 1.0
 
 
 def _run_command(
@@ -184,13 +187,30 @@ class LivePacketMonitor:
             unknown_mac_threshold=unknown_mac_threshold,
             window_seconds=window_seconds,
         )
-        self.logger = PacketCSVLogger(output_path)
-        self.recent_packets: Deque[PacketAnalysis] = deque(maxlen=MAX_VISIBLE_ROWS)
+        self.output_path = Path(output_path)
+        self.logger = PacketCSVLogger(self.output_path)
+        self.status_path = (
+            self.output_path.parent / "capture_status.json"
+        )
+        self.recent_packets: Deque[PacketAnalysis] = deque(
+            maxlen=MAX_VISIBLE_ROWS
+        )
+        self.packet_count = 0
+        self.started_at = time.strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+        self.last_packet_at: str | None = None
+        self._last_status_write = 0.0
 
     def start(self) -> None:
         print(
             f"Starting live packet capture on {self.interface}. "
             "Press Ctrl+C to stop."
+        )
+
+        self._write_runtime_status(
+            state="capturing",
+            force=True,
         )
 
         while not self.stop_requested:
@@ -201,8 +221,62 @@ class LivePacketMonitor:
                 timeout=1,
             )
 
+            self._write_runtime_status(
+                state="capturing",
+            )
+
+        self._write_runtime_status(
+            state="stopping",
+            force=True,
+        )
+
     def request_stop(self, _signum: int, _frame: Any) -> None:
         self.stop_requested = True
+
+    def _write_runtime_status(
+        self,
+        state: str,
+        force: bool = False,
+    ) -> None:
+        """Atomically save lightweight live capture progress."""
+        now_monotonic = time.monotonic()
+
+        if (
+            not force
+            and (
+                now_monotonic - self._last_status_write
+                < STATUS_WRITE_INTERVAL_SECONDS
+            )
+        ):
+            return
+
+        self.status_path.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        payload = {
+            "state": state,
+            "interface": self.interface,
+            "packet_count": self.packet_count,
+            "started_at": self.started_at,
+            "last_packet_at": self.last_packet_at,
+            "updated_at": time.strftime(
+                "%Y-%m-%d %H:%M:%S"
+            ),
+        }
+
+        temporary_path = self.status_path.with_suffix(
+            self.status_path.suffix + ".tmp"
+        )
+
+        temporary_path.write_text(
+            json.dumps(payload, indent=2),
+            encoding="utf-8",
+        )
+
+        temporary_path.replace(self.status_path)
+        self._last_status_write = now_monotonic
 
     def _handle_packet(self, packet: Any) -> None:
         analysis = self.analyzer.analyze_packet(packet)
@@ -210,6 +284,16 @@ class LivePacketMonitor:
             return
 
         self.logger.log_packet(analysis)
+
+        self.packet_count += 1
+        self.last_packet_at = time.strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+
+        self._write_runtime_status(
+            state="capturing",
+        )
+
         self.recent_packets.append(analysis)
         self._print_live_table()
 
