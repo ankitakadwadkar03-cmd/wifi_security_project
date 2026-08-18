@@ -26,11 +26,25 @@ class PacketCSVLogger:
         self.csv_path = Path(csv_path)
         self.csv_path.parent.mkdir(parents=True, exist_ok=True)
         self._ensure_header()
+        self.session_start_row = self._count_data_rows()
 
     def log_packet(self, analysis: PacketAnalysis) -> None:
         with self.csv_path.open("a", newline="", encoding="utf-8") as csv_file:
             writer = csv.DictWriter(csv_file, fieldnames=CSV_HEADERS)
             writer.writerow(analysis.as_csv_row())
+
+    def _count_data_rows(self) -> int:
+        """Return packet rows that existed before this session."""
+        if not self.csv_path.exists():
+            return 0
+
+        with self.csv_path.open(
+            "r",
+            newline="",
+            encoding="utf-8",
+        ) as csv_file:
+            return sum(1 for _ in csv.DictReader(csv_file))
+
 
     def _ensure_header(self) -> None:
         if self.csv_path.exists() and self.csv_path.stat().st_size > 0:

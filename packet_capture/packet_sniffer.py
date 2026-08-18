@@ -7,10 +7,12 @@ Run:
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 import signal
 import subprocess
 import sys
+import time
 from collections import deque
 from pathlib import Path
 from typing import Any, Deque
@@ -23,6 +25,9 @@ from packet_logger import PacketCSVLogger
 
 DEFAULT_OUTPUT = Path("packet_logs/wifi_packets.csv")
 MAX_VISIBLE_ROWS = 20
+STATUS_WRITE_INTERVAL_SECONDS = 1.0
+DEFAULT_CHANNELS_2GHZ = list(range(1, 12))
+CHANNEL_DWELL_SECONDS = 2.0
 
 
 def _run_command(
@@ -38,6 +43,83 @@ def _run_command(
         stderr=subprocess.PIPE,
         timeout=timeout,
     )
+
+
+def set_channel(interface: str, channel: int) -> bool:
+    """Switch a monitor-mode interface to a WiFi channel."""
+    result = _run_command(
+        ["iwconfig", interface, "channel", str(channel)],
+        check=False,
+    )
+
+    if result.returncode != 0:
+        details = (
+            result.stderr.strip()
+            or result.stdout.strip()
+            or "unknown channel-switch error"
+        )
+
+        print(
+            f"Warning: unable to switch {interface} "
+            f"to channel {channel}: {details}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return False
+
+    return True
+
+
+def get_enabled_channels(interface: str) -> list[int]:
+    """Return enabled WiFi channels reported by Linux."""
+    try:
+        interface_info = _run_command(
+            ["iw", "dev", interface, "info"]
+        )
+    except subprocess.CalledProcessError:
+        return DEFAULT_CHANNELS_2GHZ.copy()
+
+    phy_name = None
+
+    for raw_line in interface_info.stdout.splitlines():
+        line = raw_line.strip()
+
+        if line.startswith("wiphy "):
+            phy_number = line.split(" ", 1)[1].strip()
+            phy_name = f"phy{phy_number}"
+            break
+
+    if not phy_name:
+        return DEFAULT_CHANNELS_2GHZ.copy()
+
+    try:
+        phy_info = _run_command(
+            ["iw", "phy", phy_name, "info"]
+        )
+    except subprocess.CalledProcessError:
+        return DEFAULT_CHANNELS_2GHZ.copy()
+
+    channels = []
+
+    for raw_line in phy_info.stdout.splitlines():
+        line = raw_line.strip()
+
+        if "MHz" not in line or "[" not in line or "]" not in line:
+            continue
+
+        if "(disabled)" in line:
+            continue
+
+        try:
+            channel_text = line.split("[", 1)[1].split("]", 1)[0]
+            channel = int(channel_text)
+        except (IndexError, ValueError):
+            continue
+
+        if channel not in channels:
+            channels.append(channel)
+
+    return channels or DEFAULT_CHANNELS_2GHZ.copy()
 
 
 def _require_command(command_name: str) -> None:
@@ -100,7 +182,7 @@ def _verify_monitor_mode(interface: str) -> None:
 
 def enable_monitor_mode(interface: str) -> str:
     """Enable monitor mode and return the monitor interface name."""
-    for command_name in ("iwconfig", "airmon-ng"):
+    for command_name in ("iwconfig", "airmon-ng", "iw"):
         _require_command(command_name)
 
     _run_command(
@@ -166,6 +248,51 @@ def restore_managed_mode(interface: str) -> None:
             )
 
 
+def write_capture_error_status(
+    output_path: str | Path,
+    interface: str,
+    error_message: str,
+) -> None:
+    """Persist a capture failure so the API can explain it."""
+    status_path = (
+        Path(output_path).parent
+        / "capture_status.json"
+    )
+
+    try:
+        status_path.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        payload = {
+            "state": "error",
+            "interface": interface,
+            "last_error": error_message,
+            "updated_at": time.strftime(
+                "%Y-%m-%d %H:%M:%S"
+            ),
+        }
+
+        temporary_path = status_path.with_suffix(
+            status_path.suffix + ".tmp"
+        )
+
+        temporary_path.write_text(
+            json.dumps(payload, indent=2),
+            encoding="utf-8",
+        )
+
+        temporary_path.replace(status_path)
+
+    except OSError as status_error:
+        print(
+            "Warning: unable to save capture error status: "
+            f"{status_error}",
+            file=sys.stderr,
+        )
+
+
 class LivePacketMonitor:
     """Coordinate packet sniffing, analysis, logging, and terminal output."""
 
@@ -184,8 +311,29 @@ class LivePacketMonitor:
             unknown_mac_threshold=unknown_mac_threshold,
             window_seconds=window_seconds,
         )
-        self.logger = PacketCSVLogger(output_path)
-        self.recent_packets: Deque[PacketAnalysis] = deque(maxlen=MAX_VISIBLE_ROWS)
+        self.output_path = Path(output_path)
+        self.logger = PacketCSVLogger(self.output_path)
+        self.status_path = (
+            self.output_path.parent / "capture_status.json"
+        )
+        self.recent_packets: Deque[PacketAnalysis] = deque(
+            maxlen=MAX_VISIBLE_ROWS
+        )
+        self.packet_count = 0
+        self.packet_type_counts: dict[str, int] = {}
+        self.started_at = time.strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+        self.started_monotonic = time.monotonic()
+        self.last_packet_at: str | None = None
+        self._last_status_write = 0.0
+
+        self.enabled_channels = get_enabled_channels(
+            self.interface
+        )
+        self.current_channel: int | None = None
+        self.channel_index = 0
+        self.sweep_number = 0
 
     def start(self) -> None:
         print(
@@ -193,16 +341,149 @@ class LivePacketMonitor:
             "Press Ctrl+C to stop."
         )
 
+        self._write_runtime_status(
+            state="capturing",
+            force=True,
+        )
+
         while not self.stop_requested:
-            sniff(
-                iface=self.interface,
-                prn=self._handle_packet,
-                store=False,
-                timeout=1,
-            )
+            self.sweep_number += 1
+
+            for index, channel in enumerate(
+                self.enabled_channels,
+                start=1,
+            ):
+                if self.stop_requested:
+                    break
+
+                self.channel_index = index
+
+                if not set_channel(
+                    self.interface,
+                    channel,
+                ):
+                    continue
+
+                self.current_channel = channel
+
+                self._write_runtime_status(
+                    state="capturing",
+                    force=True,
+                )
+
+                dwell_deadline = (
+                    time.monotonic()
+                    + CHANNEL_DWELL_SECONDS
+                )
+
+                while (
+                    not self.stop_requested
+                    and time.monotonic()
+                    < dwell_deadline
+                ):
+                    remaining = (
+                        dwell_deadline
+                        - time.monotonic()
+                    )
+
+                    sniff(
+                        iface=self.interface,
+                        prn=self._handle_packet,
+                        store=False,
+                        timeout=min(
+                            1.0,
+                            max(remaining, 0.05),
+                        ),
+                    )
+
+                    self._write_runtime_status(
+                        state="capturing",
+                    )
+
+        self._write_runtime_status(
+            state="stopping",
+            force=True,
+        )
 
     def request_stop(self, _signum: int, _frame: Any) -> None:
         self.stop_requested = True
+
+    def _write_runtime_status(
+        self,
+        state: str,
+        force: bool = False,
+    ) -> None:
+        """Atomically save lightweight live capture progress."""
+        now_monotonic = time.monotonic()
+
+        if (
+            not force
+            and (
+                now_monotonic - self._last_status_write
+                < STATUS_WRITE_INTERVAL_SECONDS
+            )
+        ):
+            return
+
+        self.status_path.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        elapsed_seconds = max(
+            0.0,
+            time.monotonic() - self.started_monotonic,
+        )
+
+        packet_rate = (
+            self.packet_count / elapsed_seconds
+            if elapsed_seconds > 0
+            else 0.0
+        )
+
+        payload = {
+            "state": state,
+            "interface": self.interface,
+            "last_error": "",
+            "packet_count": self.packet_count,
+            "session_start_row": (
+                self.logger.session_start_row
+            ),
+            "packet_rate": round(packet_rate, 2),
+            "elapsed_seconds": round(
+                elapsed_seconds,
+                1,
+            ),
+            "packet_type_counts": dict(
+                sorted(self.packet_type_counts.items())
+            ),
+            "started_at": self.started_at,
+            "last_packet_at": self.last_packet_at,
+            "current_channel": self.current_channel,
+            "channel_index": self.channel_index,
+            "total_channels": len(
+                self.enabled_channels
+            ),
+            "enabled_channels": (
+                self.enabled_channels
+            ),
+            "sweep_number": self.sweep_number,
+            "updated_at": time.strftime(
+                "%Y-%m-%d %H:%M:%S"
+            ),
+        }
+
+        temporary_path = self.status_path.with_suffix(
+            self.status_path.suffix + ".tmp"
+        )
+
+        temporary_path.write_text(
+            json.dumps(payload, indent=2),
+            encoding="utf-8",
+        )
+
+        temporary_path.replace(self.status_path)
+        self._last_status_write = now_monotonic
 
     def _handle_packet(self, packet: Any) -> None:
         analysis = self.analyzer.analyze_packet(packet)
@@ -210,6 +491,24 @@ class LivePacketMonitor:
             return
 
         self.logger.log_packet(analysis)
+
+        self.packet_count += 1
+        self.packet_type_counts[analysis.packet_type] = (
+            self.packet_type_counts.get(
+                analysis.packet_type,
+                0,
+            )
+            + 1
+        )
+
+        self.last_packet_at = time.strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+
+        self._write_runtime_status(
+            state="capturing",
+        )
+
         self.recent_packets.append(analysis)
         self._print_live_table()
 
@@ -329,19 +628,45 @@ def main() -> int:
         signal.signal(signal.SIGTERM, monitor.request_stop)
         monitor.start()
     except PermissionError:
-        print(
-            "Permission denied. Run with sudo/root privileges.",
-            file=sys.stderr,
+        error_message = (
+            "Permission denied. Run with sudo/root privileges."
+        )
+        print(error_message, file=sys.stderr)
+        write_capture_error_status(
+            args.output,
+            monitor_interface,
+            error_message,
         )
         return 1
+
     except RuntimeError as exc:
-        print(f"Monitor-mode error: {exc}", file=sys.stderr)
+        error_message = f"Monitor-mode error: {exc}"
+        print(error_message, file=sys.stderr)
+        write_capture_error_status(
+            args.output,
+            monitor_interface,
+            error_message,
+        )
         return 1
+
     except OSError as exc:
-        print(f"Interface error: {exc}", file=sys.stderr)
+        error_message = f"Interface error: {exc}"
+        print(error_message, file=sys.stderr)
+        write_capture_error_status(
+            args.output,
+            monitor_interface,
+            error_message,
+        )
         return 1
+
     except Exception as exc:
-        print(f"Unexpected error: {exc}", file=sys.stderr)
+        error_message = f"Unexpected error: {exc}"
+        print(error_message, file=sys.stderr)
+        write_capture_error_status(
+            args.output,
+            monitor_interface,
+            error_message,
+        )
         return 1
     finally:
         if monitor_mode_created:

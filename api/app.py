@@ -46,6 +46,7 @@ SCANNER_SERVICE_INTERFACE = "wlan0"
 CAPTURE_SERVICE_NAME = "netshield-capture.service"
 CAPTURE_SERVICE_INTERFACE = "wlan0"
 PACKET_LOG_CSV = PROJECT_ROOT / "packet_logs" / "wifi_packets.csv"
+CAPTURE_STATUS_JSON = PROJECT_ROOT / "packet_logs" / "capture_status.json"
 LIVE_PACKET_ALERT_HISTORY_JSON = (
     PROJECT_ROOT
     / "security_reports"
@@ -176,12 +177,20 @@ def _safe_int(value, default=0):
         return default
 
 
-def read_packets(limit: int = 50) -> list[dict]:
-    """Return the most recent packet-capture rows."""
+def read_packets(
+    limit: int = 50,
+    session_start_row: int | None = None,
+) -> list[dict]:
+    """Return recent packet rows, optionally limited to one capture session."""
     if not PACKET_LOG_CSV.exists():
         return []
 
     safe_limit = max(1, min(limit, 500))
+    safe_start_row = (
+        max(0, int(session_start_row))
+        if session_start_row is not None
+        else 0
+    )
     recent_rows = deque(maxlen=safe_limit)
 
     with PACKET_LOG_CSV.open(
@@ -189,7 +198,10 @@ def read_packets(limit: int = 50) -> list[dict]:
     ) as csv_file:
         reader = csv.DictReader(csv_file)
 
-        for row in reader:
+        for row_index, row in enumerate(reader):
+            if row_index < safe_start_row:
+                continue
+
             recent_rows.append(
                 {
                     "timestamp": (
@@ -221,8 +233,18 @@ def read_packets(limit: int = 50) -> list[dict]:
 
 
 def read_packet_alerts() -> list[dict]:
-    """Detect potential security events in the latest captured packets."""
-    packets = read_packets(limit=200)
+    """Detect security events only within the latest capture session."""
+    progress = read_capture_progress()
+
+    session_start_row = _safe_int(
+        progress.get("session_start_row"),
+        default=0,
+    )
+
+    packets = read_packets(
+        limit=200,
+        session_start_row=session_start_row,
+    )
 
     if not packets:
         return []
@@ -1493,6 +1515,48 @@ def _read_capture_service_pid() -> int | None:
     return process_id if process_id > 0 else None
 
 
+def read_capture_progress() -> dict:
+    """Read live packet-capture runtime progress."""
+    empty_progress = {
+        "state": "idle",
+        "interface": None,
+        "last_error": "",
+        "packet_count": 0,
+        "session_start_row": 0,
+        "packet_rate": 0.0,
+        "elapsed_seconds": 0.0,
+        "packet_type_counts": {},
+        "started_at": None,
+        "last_packet_at": None,
+        "current_channel": None,
+        "channel_index": 0,
+        "total_channels": 0,
+        "enabled_channels": [],
+        "sweep_number": 0,
+        "updated_at": None,
+    }
+
+    if not CAPTURE_STATUS_JSON.exists():
+        return empty_progress
+
+    try:
+        payload = json.loads(
+            CAPTURE_STATUS_JSON.read_text(
+                encoding="utf-8"
+            )
+        )
+    except (OSError, json.JSONDecodeError):
+        return empty_progress
+
+    if not isinstance(payload, dict):
+        return empty_progress
+
+    return {
+        **empty_progress,
+        **payload,
+    }
+
+
 def read_capture_status() -> dict:
     """Return packet-capture service and adapter status."""
     service_state, service_error = _read_capture_service_state()
@@ -1514,6 +1578,27 @@ def read_capture_status() -> dict:
         "stopping",
     }
 
+    progress = read_capture_progress()
+
+    runtime_error = str(
+        progress.get("last_error") or ""
+    ).strip()
+
+    if (
+        capture_state == "idle"
+        and progress.get("state") == "error"
+        and runtime_error
+    ):
+        capture_state = "error"
+
+    if not running:
+        if capture_state != "error":
+            progress["state"] = "idle"
+
+        progress["current_channel"] = None
+        progress["channel_index"] = 0
+        progress["packet_rate"] = 0.0
+
     messages = {
         "starting": (
             f"Starting packet capture on {CAPTURE_SERVICE_INTERFACE}."
@@ -1526,6 +1611,20 @@ def read_capture_status() -> dict:
         "error": "The packet-capture service encountered an error.",
     }
 
+    adapter = read_adapter_status()
+
+    if adapter.get("available"):
+        adapter["state"] = {
+            "starting": "starting",
+            "running": "capturing",
+            "stopping": "stopping",
+            "idle": "idle",
+            "error": "error",
+        }.get(
+            capture_state,
+            adapter.get("state"),
+        )
+
     return {
         "state": capture_state,
         "running": running,
@@ -1535,10 +1634,14 @@ def read_capture_status() -> dict:
         "pid": (
             _read_capture_service_pid() if running else None
         ),
-        "last_error": service_error,
+        "last_error": (
+            str(progress.get("last_error") or "").strip()
+            or service_error
+        ),
         "message": messages[capture_state],
-        "adapter": read_adapter_status(),
+        "adapter": adapter,
         "packet_log_found": PACKET_LOG_CSV.exists(),
+        "progress": progress,
     }
 
 
@@ -1726,10 +1829,33 @@ def packets():
 
     packet_rows = read_packets(limit=limit)
 
+    updated_at = None
+    age_seconds = None
+
+    if PACKET_LOG_CSV.exists():
+        modified_time = datetime.fromtimestamp(
+            PACKET_LOG_CSV.stat().st_mtime,
+            tz=timezone.utc,
+        )
+
+        updated_at = modified_time.isoformat()
+        age_seconds = max(
+            0,
+            round(
+                (
+                    datetime.now(timezone.utc)
+                    - modified_time
+                ).total_seconds(),
+                1,
+            ),
+        )
+
     return jsonify(
         {
             "count": len(packet_rows),
             "source": "wifi_packets.csv",
+            "updated_at": updated_at,
+            "age_seconds": age_seconds,
             "packets": packet_rows,
         }
     )
@@ -1756,7 +1882,22 @@ def alert_history():
 
 @app.get("/api/threats")
 def threats():
-    live_alerts = read_packet_alerts()
+    capture_status = read_capture_status()
+    capture_progress = capture_status.get(
+        "progress",
+        {},
+    )
+
+    live_capture_active = (
+        capture_status.get("state") == "running"
+        and capture_progress.get("state") == "capturing"
+    )
+
+    live_alerts = (
+        read_packet_alerts()
+        if live_capture_active
+        else []
+    )
 
     if live_alerts:
         save_packet_alert_history(live_alerts)
