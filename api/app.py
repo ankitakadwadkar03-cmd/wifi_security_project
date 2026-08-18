@@ -37,6 +37,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 NETWORK_CSV = PROJECT_ROOT / "scan_results" / "wifi_scan_results.csv"
 SCANNER_STATUS_JSON = PROJECT_ROOT / "scan_results" / "scanner_status.json"
 SECURITY_REPORT_CSV = PROJECT_ROOT / "security_reports" / "final_security_report.csv"
+TRUSTED_NETWORKS_CSV = PROJECT_ROOT / "trusted_baseline" / "trusted_networks.csv"
 REPORTS_DIRECTORY = PROJECT_ROOT / "security_reports"
 HISTORY_DB = PROJECT_ROOT / "security_reports" / "history.db"
 ALLOWED_REPORT_EXTENSIONS = {".csv", ".json", ".txt", ".log"}
@@ -2036,6 +2037,8 @@ def run_threat_analysis() -> tuple[dict, int]:
                     str(session_packet_csv),
                     "--report-csv",
                     str(temporary_report),
+                    "--trusted-csv",
+                    str(TRUSTED_NETWORKS_CSV),
                 ],
                 cwd=PROJECT_ROOT,
                 check=False,
