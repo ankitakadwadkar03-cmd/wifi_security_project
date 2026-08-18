@@ -663,10 +663,17 @@ def read_threats() -> list[dict]:
             ).strip().upper()
 
             severity = {
-                "DANGER": "Critical",
-                "WARNING": "High",
-                "LOW RISK": "Medium",
-            }.get(risk_level, "Review")
+                "EVIL_TWIN": "Critical",
+                "ROGUE_AP": "High",
+                "SUSPICIOUS": "Medium",
+            }.get(
+                attack_type,
+                {
+                    "DANGER": "Critical",
+                    "WARNING": "High",
+                    "LOW RISK": "Medium",
+                }.get(risk_level, "Review"),
+            )
 
             title = {
                 "ROGUE_AP": "Potential Rogue Access Point",
@@ -700,10 +707,29 @@ def read_threats() -> list[dict]:
                     "attack_type": attack_type,
                     "severity": severity,
                     "title": title,
+                    "confidence": _safe_int(
+                        row.get("Confidence"),
+                        default=0,
+                    ),
+                    "detection_reason": (
+                        row.get("Detection_Reason")
+                        or ""
+                    ).strip(),
+                    "recommended_action": (
+                        row.get("Recommended_Action")
+                        or ""
+                    ).strip(),
                     "summary": (
-                        "This is a potential finding produced by automated "
-                        "wireless analysis. Verify the BSSID and compare it "
-                        "with trusted network records before taking action."
+                        (
+                            row.get("Detection_Reason")
+                            or ""
+                        ).strip()
+                        or (
+                            "This is a potential finding produced by "
+                            "automated wireless analysis. Verify the "
+                            "BSSID and compare it with trusted network "
+                            "records before taking action."
+                        )
                     ),
                 }
             )

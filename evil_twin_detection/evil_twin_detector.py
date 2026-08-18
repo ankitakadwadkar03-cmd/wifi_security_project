@@ -185,6 +185,144 @@ def detect_evil_twin(
 
     return evil_twin_bssids
 
+def build_detection_evidence(
+    report_row: dict[str, str],
+    attack_type: str,
+    trusted_by_ssid: dict[str, set[str]],
+) -> tuple[str, str, int]:
+    """Explain why a network received its attack classification."""
+    ssid = _clean_text(
+        report_row.get("SSID"),
+        "Unknown_Device",
+    )
+
+    bssid = _normalize_mac(
+        report_row.get("BSSID")
+    )
+
+    ssid_key = ssid.lower()
+
+    deauth_count = _to_int(
+        report_row.get("Deauth_Count")
+    )
+
+    unknown_mac_count = _to_int(
+        report_row.get("Unknown_MAC_Count")
+    )
+
+    total_packets = _to_int(
+        report_row.get("Total_Packets")
+    )
+
+    score = _to_int(
+        report_row.get("Suspicious_Score"),
+        default=100,
+    )
+
+    risk_level = _clean_text(
+        report_row.get("Risk_Level"),
+        "SAFE",
+    ).upper()
+
+    if attack_type == ATTACK_EVIL_TWIN:
+        trusted_bssids = sorted(
+            trusted_by_ssid.get(
+                ssid_key,
+                set(),
+            )
+        )
+
+        trusted_text = (
+            ", ".join(trusted_bssids)
+            if trusted_bssids
+            else "not available"
+        )
+
+        return (
+            (
+                f"SSID '{ssid}' matches a trusted network, "
+                f"but detected BSSID {bssid} is not in the "
+                f"trusted baseline. Trusted BSSID(s): "
+                f"{trusted_text}."
+            ),
+            (
+                "Verify the router identity and physical MAC/BSSID "
+                "before connecting. Treat this as a possible Evil "
+                "Twin indicator until manually verified."
+            ),
+            90,
+        )
+
+    if attack_type == ATTACK_ROGUE_AP:
+        return (
+            (
+                f"BSSID {bssid} appears unauthorized based on "
+                "the available network evidence."
+            ),
+            (
+                "Verify ownership and authorization before "
+                "treating this access point as trusted."
+            ),
+            75,
+        )
+
+    if attack_type == ATTACK_SUSPICIOUS:
+        reasons = []
+
+        if deauth_count > 0:
+            reasons.append(
+                f"{deauth_count} deauthentication packet(s)"
+            )
+
+        if unknown_mac_count > 0:
+            reasons.append(
+                f"{unknown_mac_count} unknown-MAC event(s)"
+            )
+
+        if total_packets >= 1000:
+            reasons.append(
+                f"high packet volume ({total_packets})"
+            )
+
+        if risk_level in {
+            "LOW RISK",
+            "WARNING",
+            "DANGER",
+        }:
+            reasons.append(
+                f"risk level {risk_level}"
+            )
+
+        if score < 80:
+            reasons.append(
+                f"security score {score}"
+            )
+
+        reason_text = (
+            ", ".join(reasons)
+            if reasons
+            else "packet or risk anomalies"
+        )
+
+        return (
+            (
+                "Suspicious wireless behavior was detected: "
+                f"{reason_text}."
+            ),
+            (
+                "Review packet evidence and repeat monitoring "
+                "to determine whether the activity is expected."
+            ),
+            70,
+        )
+
+    return (
+        "No significant threat indicators were detected.",
+        "Continue normal monitoring.",
+        10,
+    )
+
+
 def classify_attack(
     report_row: dict[str, str],
     rogue_bssids: set[str],
@@ -245,12 +383,43 @@ def update_security_report(
     )
 
     updated_rows: list[dict[str, str]] = []
+
     for row in report_rows:
         updated_row = dict(row)
-        updated_row["Attack_Type"] = classify_attack(updated_row, rogue_bssids, evil_twin_bssids)
+
+        attack_type = classify_attack(
+            updated_row,
+            rogue_bssids,
+            evil_twin_bssids,
+        )
+
+        (
+            detection_reason,
+            recommended_action,
+            confidence,
+        ) = build_detection_evidence(
+            updated_row,
+            attack_type,
+            trusted_by_ssid,
+        )
+
+        updated_row["Attack_Type"] = attack_type
+        updated_row["Detection_Reason"] = detection_reason
+        updated_row["Recommended_Action"] = recommended_action
+        updated_row["Confidence"] = str(confidence)
+
         updated_rows.append(updated_row)
 
-    fieldnames = _merge_fieldnames(report_rows, REPORT_BASE_COLUMNS + ["Attack_Type"])
+    fieldnames = _merge_fieldnames(
+        report_rows,
+        REPORT_BASE_COLUMNS
+        + [
+            "Attack_Type",
+            "Detection_Reason",
+            "Recommended_Action",
+            "Confidence",
+        ],
+    )
     report_path.parent.mkdir(parents=True, exist_ok=True)
     with report_path.open("w", newline="", encoding="utf-8") as csv_file:
         writer = csv.DictWriter(csv_file, fieldnames=fieldnames, extrasaction="ignore")

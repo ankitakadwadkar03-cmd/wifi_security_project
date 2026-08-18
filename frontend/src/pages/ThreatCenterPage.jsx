@@ -289,7 +289,23 @@ export default function ThreatCenterPage() {
                     <span>Risk Level</span>
                     <strong>{item.risk_level}</strong>
                   </div>
+
+                  <div>
+                    <span>Confidence</span>
+                    <strong>
+                      {item.confidence
+                        ? `${item.confidence}%`
+                        : "Not available"}
+                    </strong>
+                  </div>
                 </div>
+
+                {item.recommended_action && (
+                  <div className="recommendationBox">
+                    <h4>Recommended Action</h4>
+                    <p>{item.recommended_action}</p>
+                  </div>
+                )}
               </div>
             ))}
           </div>
