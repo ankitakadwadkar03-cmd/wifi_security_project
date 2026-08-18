@@ -17,6 +17,69 @@ export default function ThreatCenterPage() {
   const [historyLoading, setHistoryLoading] = useState(true);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [analysisLoading, setAnalysisLoading] = useState(false);
+  const [analysisMessage, setAnalysisMessage] = useState("");
+  const [analysisError, setAnalysisError] = useState("");
+
+  async function runThreatAnalysis() {
+    try {
+      setAnalysisLoading(true);
+      setAnalysisMessage("");
+      setAnalysisError("");
+
+      const response = await fetch(
+        `${API_BASE_URL}/api/threats/analyze`,
+        {
+          method: "POST",
+        }
+      );
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          data.message ||
+            `Threat analysis returned HTTP ${response.status}`
+        );
+      }
+
+      setAnalysisMessage(
+        `${data.message} ${data.network_count ?? 0} network(s) analyzed, ` +
+          `${data.session_packet_count ?? 0} latest-session packet(s), ` +
+          `${data.finding_count ?? 0} finding(s).`
+      );
+
+      const threatsResponse = await fetch(
+        `${API_BASE_URL}/api/threats`
+      );
+
+      if (!threatsResponse.ok) {
+        throw new Error(
+          `Threat refresh returned HTTP ${threatsResponse.status}`
+        );
+      }
+
+      const threatsData = await threatsResponse.json();
+
+      setThreats(
+        Array.isArray(threatsData.threats)
+          ? threatsData.threats
+          : []
+      );
+    } catch (analysisRequestError) {
+      console.error(
+        "Threat analysis failed:",
+        analysisRequestError
+      );
+
+      setAnalysisError(
+        analysisRequestError.message ||
+          "Threat analysis could not be completed."
+      );
+    } finally {
+      setAnalysisLoading(false);
+    }
+  }
 
   useEffect(() => {
     const controller = new AbortController();
@@ -117,6 +180,35 @@ export default function ThreatCenterPage() {
           Automated detections should be verified before taking action.
         </p>
       </div>
+
+      <div className="threatAnalysisActions">
+        <button
+          type="button"
+          onClick={runThreatAnalysis}
+          disabled={analysisLoading}
+        >
+          {analysisLoading
+            ? "Analyzing..."
+            : "Run Threat Analysis"}
+        </button>
+
+        <p>
+          Uses the latest WiFi scan and latest completed packet-capture
+          session to generate fresh threat classifications.
+        </p>
+      </div>
+
+      {analysisMessage && (
+        <p className="scannerActionMessage">
+          {analysisMessage}
+        </p>
+      )}
+
+      {analysisError && (
+        <p className="scannerActionMessage errorMessage">
+          {analysisError}
+        </p>
+      )}
 
       {loading && (
         <div className="networkTableMessage">
