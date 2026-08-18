@@ -1137,6 +1137,12 @@ export default function DashboardPage({ setCurrentPage }) {
             {captureMessage}
           </p>
         )}
+
+        {captureStatus.last_error && (
+          <p className="scannerActionMessage errorMessage">
+            Capture error: {captureStatus.last_error}
+          </p>
+        )}
       </div>
 
       {error && (

@@ -248,6 +248,51 @@ def restore_managed_mode(interface: str) -> None:
             )
 
 
+def write_capture_error_status(
+    output_path: str | Path,
+    interface: str,
+    error_message: str,
+) -> None:
+    """Persist a capture failure so the API can explain it."""
+    status_path = (
+        Path(output_path).parent
+        / "capture_status.json"
+    )
+
+    try:
+        status_path.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        payload = {
+            "state": "error",
+            "interface": interface,
+            "last_error": error_message,
+            "updated_at": time.strftime(
+                "%Y-%m-%d %H:%M:%S"
+            ),
+        }
+
+        temporary_path = status_path.with_suffix(
+            status_path.suffix + ".tmp"
+        )
+
+        temporary_path.write_text(
+            json.dumps(payload, indent=2),
+            encoding="utf-8",
+        )
+
+        temporary_path.replace(status_path)
+
+    except OSError as status_error:
+        print(
+            "Warning: unable to save capture error status: "
+            f"{status_error}",
+            file=sys.stderr,
+        )
+
+
 class LivePacketMonitor:
     """Coordinate packet sniffing, analysis, logging, and terminal output."""
 
@@ -399,6 +444,7 @@ class LivePacketMonitor:
         payload = {
             "state": state,
             "interface": self.interface,
+            "last_error": "",
             "packet_count": self.packet_count,
             "session_start_row": (
                 self.logger.session_start_row
@@ -582,19 +628,45 @@ def main() -> int:
         signal.signal(signal.SIGTERM, monitor.request_stop)
         monitor.start()
     except PermissionError:
-        print(
-            "Permission denied. Run with sudo/root privileges.",
-            file=sys.stderr,
+        error_message = (
+            "Permission denied. Run with sudo/root privileges."
+        )
+        print(error_message, file=sys.stderr)
+        write_capture_error_status(
+            args.output,
+            monitor_interface,
+            error_message,
         )
         return 1
+
     except RuntimeError as exc:
-        print(f"Monitor-mode error: {exc}", file=sys.stderr)
+        error_message = f"Monitor-mode error: {exc}"
+        print(error_message, file=sys.stderr)
+        write_capture_error_status(
+            args.output,
+            monitor_interface,
+            error_message,
+        )
         return 1
+
     except OSError as exc:
-        print(f"Interface error: {exc}", file=sys.stderr)
+        error_message = f"Interface error: {exc}"
+        print(error_message, file=sys.stderr)
+        write_capture_error_status(
+            args.output,
+            monitor_interface,
+            error_message,
+        )
         return 1
+
     except Exception as exc:
-        print(f"Unexpected error: {exc}", file=sys.stderr)
+        error_message = f"Unexpected error: {exc}"
+        print(error_message, file=sys.stderr)
+        write_capture_error_status(
+            args.output,
+            monitor_interface,
+            error_message,
+        )
         return 1
     finally:
         if monitor_mode_created:

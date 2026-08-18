@@ -1520,6 +1520,7 @@ def read_capture_progress() -> dict:
     empty_progress = {
         "state": "idle",
         "interface": None,
+        "last_error": "",
         "packet_count": 0,
         "session_start_row": 0,
         "packet_rate": 0.0,
@@ -1579,8 +1580,21 @@ def read_capture_status() -> dict:
 
     progress = read_capture_progress()
 
+    runtime_error = str(
+        progress.get("last_error") or ""
+    ).strip()
+
+    if (
+        capture_state == "idle"
+        and progress.get("state") == "error"
+        and runtime_error
+    ):
+        capture_state = "error"
+
     if not running:
-        progress["state"] = "idle"
+        if capture_state != "error":
+            progress["state"] = "idle"
+
         progress["current_channel"] = None
         progress["channel_index"] = 0
         progress["packet_rate"] = 0.0
@@ -1620,7 +1634,10 @@ def read_capture_status() -> dict:
         "pid": (
             _read_capture_service_pid() if running else None
         ),
-        "last_error": service_error,
+        "last_error": (
+            str(progress.get("last_error") or "").strip()
+            or service_error
+        ),
         "message": messages[capture_state],
         "adapter": adapter,
         "packet_log_found": PACKET_LOG_CSV.exists(),
@@ -1866,10 +1883,19 @@ def alert_history():
 @app.get("/api/threats")
 def threats():
     capture_status = read_capture_status()
+    capture_progress = capture_status.get(
+        "progress",
+        {},
+    )
+
+    live_capture_active = (
+        capture_status.get("state") == "running"
+        and capture_progress.get("state") == "capturing"
+    )
 
     live_alerts = (
         read_packet_alerts()
-        if capture_status.get("running")
+        if live_capture_active
         else []
     )
 
