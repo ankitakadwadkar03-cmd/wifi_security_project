@@ -741,6 +741,71 @@ def read_threats() -> list[dict]:
     return findings
 
 
+def get_threat_report_status() -> dict:
+    """Check whether the saved threat report matches current inputs."""
+
+    if not SECURITY_REPORT_CSV.exists():
+        return {
+            "status": "missing",
+            "analysis_required": True,
+            "stale_sources": [],
+            "message": (
+                "No threat analysis report exists yet. "
+                "Run Threat Analysis to generate one."
+            ),
+        }
+
+    try:
+        report_mtime = SECURITY_REPORT_CSV.stat().st_mtime
+    except OSError:
+        return {
+            "status": "unavailable",
+            "analysis_required": True,
+            "stale_sources": [],
+            "message": (
+                "Threat report freshness could not be verified. "
+                "Run Threat Analysis again."
+            ),
+        }
+
+    source_files = [
+        ("WiFi scan", NETWORK_CSV),
+        ("packet capture", PACKET_LOG_CSV),
+        ("trusted baseline", TRUSTED_NETWORKS_CSV),
+    ]
+
+    stale_sources = []
+
+    for label, source_path in source_files:
+        if not source_path.exists():
+            continue
+
+        try:
+            if source_path.stat().st_mtime > report_mtime:
+                stale_sources.append(label)
+        except OSError:
+            continue
+
+    if stale_sources:
+        return {
+            "status": "stale",
+            "analysis_required": True,
+            "stale_sources": stale_sources,
+            "message": (
+                "Saved threat findings are older than current "
+                + ", ".join(stale_sources)
+                + ". Run Threat Analysis again."
+            ),
+        }
+
+    return {
+        "status": "current",
+        "analysis_required": False,
+        "stale_sources": [],
+        "message": "Threat analysis report is current.",
+    }
+
+
 def _format_file_size(size_bytes: int) -> str:
     """Convert bytes into a readable file-size label."""
     if size_bytes < 1024:
@@ -2196,7 +2261,13 @@ def threats():
     if live_alerts:
         save_packet_alert_history(live_alerts)
 
-    report_findings = read_threats()
+    report_status = get_threat_report_status()
+
+    report_findings = (
+        read_threats()
+        if report_status["status"] == "current"
+        else []
+    )
 
     threat_rows = live_alerts + report_findings
 
@@ -2209,6 +2280,14 @@ def threats():
             ],
             "live_alert_count": len(live_alerts),
             "report_finding_count": len(report_findings),
+            "report_status": report_status["status"],
+            "analysis_required": report_status[
+                "analysis_required"
+            ],
+            "stale_sources": report_status[
+                "stale_sources"
+            ],
+            "report_message": report_status["message"],
             "threats": threat_rows,
         }
     )

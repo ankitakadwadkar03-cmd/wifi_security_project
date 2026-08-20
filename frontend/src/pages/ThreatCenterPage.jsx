@@ -20,6 +20,7 @@ export default function ThreatCenterPage() {
   const [analysisLoading, setAnalysisLoading] = useState(false);
   const [analysisMessage, setAnalysisMessage] = useState("");
   const [analysisError, setAnalysisError] = useState("");
+  const [reportStatus, setReportStatus] = useState(null);
 
   async function runThreatAnalysis() {
     try {
@@ -66,6 +67,20 @@ export default function ThreatCenterPage() {
           ? threatsData.threats
           : []
       );
+
+      setReportStatus({
+        status: threatsData.report_status || "unknown",
+        analysisRequired: Boolean(
+          threatsData.analysis_required
+        ),
+        staleSources: Array.isArray(
+          threatsData.stale_sources
+        )
+          ? threatsData.stale_sources
+          : [],
+        message:
+          threatsData.report_message || "",
+      });
     } catch (analysisRequestError) {
       console.error(
         "Threat analysis failed:",
@@ -101,7 +116,25 @@ export default function ThreatCenterPage() {
         }
 
         const data = await response.json();
-        setThreats(Array.isArray(data.threats) ? data.threats : []);
+
+        setThreats(
+          Array.isArray(data.threats)
+            ? data.threats
+            : []
+        );
+
+        setReportStatus({
+          status: data.report_status || "unknown",
+          analysisRequired: Boolean(
+            data.analysis_required
+          ),
+          staleSources: Array.isArray(
+            data.stale_sources
+          )
+            ? data.stale_sources
+            : [],
+          message: data.report_message || "",
+        });
       } catch (fetchError) {
         if (fetchError.name !== "AbortError") {
           console.error("Failed to load threats:", fetchError);
@@ -210,6 +243,15 @@ export default function ThreatCenterPage() {
         </p>
       )}
 
+      {reportStatus?.analysisRequired && (
+        <div className="networkTableMessage">
+          <strong>Threat analysis needs to be refreshed.</strong>
+          <br />
+          {reportStatus.message ||
+            "Run Threat Analysis again to generate current findings."}
+        </div>
+      )}
+
       {loading && (
         <div className="networkTableMessage">
           Loading security findings...
@@ -222,11 +264,14 @@ export default function ThreatCenterPage() {
         </div>
       )}
 
-      {!loading && !error && threats.length === 0 && (
-        <div className="networkTableMessage">
-          No suspicious wireless findings are currently available.
-        </div>
-      )}
+      {!loading &&
+        !error &&
+        !reportStatus?.analysisRequired &&
+        threats.length === 0 && (
+          <div className="networkTableMessage">
+            No suspicious wireless findings are currently available.
+          </div>
+        )}
 
       {!loading && !error && threats.length > 0 && (
         <>
