@@ -666,6 +666,7 @@ def read_threats() -> list[dict]:
                 "EVIL_TWIN": "Critical",
                 "ROGUE_AP": "High",
                 "SUSPICIOUS": "Medium",
+                "WEAK_ENCRYPTION": "Medium",
             }.get(
                 attack_type,
                 {
@@ -679,6 +680,7 @@ def read_threats() -> list[dict]:
                 "ROGUE_AP": "Potential Rogue Access Point",
                 "EVIL_TWIN": "Potential Evil Twin Network",
                 "SUSPICIOUS": "Suspicious Wireless Activity",
+                "WEAK_ENCRYPTION": "Weak WiFi Encryption",
             }.get(attack_type, "Wireless Security Finding")
 
             findings.append(

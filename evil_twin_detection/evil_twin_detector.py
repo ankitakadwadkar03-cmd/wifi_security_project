@@ -28,6 +28,7 @@ ATTACK_NORMAL = "NORMAL"
 ATTACK_ROGUE_AP = "ROGUE_AP"
 ATTACK_EVIL_TWIN = "EVIL_TWIN"
 ATTACK_SUSPICIOUS = "SUSPICIOUS"
+ATTACK_WEAK_ENCRYPTION = "WEAK_ENCRYPTION"
 
 REPORT_BASE_COLUMNS = [
     "SSID",
@@ -316,6 +317,24 @@ def build_detection_evidence(
             70,
         )
 
+    if attack_type == ATTACK_WEAK_ENCRYPTION:
+        encryption = _clean_text(
+            report_row.get("Encryption"),
+            "Unknown",
+        )
+
+        return (
+            (
+                f"Network uses {encryption} encryption, "
+                "which does not provide adequate WiFi security."
+            ),
+            (
+                "Avoid sensitive activity on this network. "
+                "Use WPA2 or WPA3 encryption when possible."
+            ),
+            65,
+        )
+
     return (
         "No significant threat indicators were detected.",
         "Continue normal monitoring.",
@@ -328,18 +347,30 @@ def classify_attack(
     rogue_bssids: set[str],
     evil_twin_bssids: set[str],
 ) -> str:
-    """Classify one network as NORMAL, ROGUE_AP, EVIL_TWIN, or SUSPICIOUS."""
+    """Classify one network using identity, packet, and encryption evidence."""
 
-    bssid = _normalize_mac(report_row.get("BSSID"))
+    bssid = _normalize_mac(
+        report_row.get("BSSID")
+    )
 
     if bssid in rogue_bssids:
         return ATTACK_ROGUE_AP
+
     if bssid in evil_twin_bssids:
         return ATTACK_EVIL_TWIN
+
     if _has_packet_anomalies(report_row):
         return ATTACK_SUSPICIOUS
-    return ATTACK_NORMAL
 
+    encryption = _clean_text(
+        report_row.get("Encryption"),
+        "Unknown",
+    ).upper()
+
+    if encryption in {"OPEN", "WEP"}:
+        return ATTACK_WEAK_ENCRYPTION
+
+    return ATTACK_NORMAL
 
 def update_security_report(
     scan_csv_path: str | Path = DEFAULT_SCAN_CSV,
