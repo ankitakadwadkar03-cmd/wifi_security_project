@@ -6212,3 +6212,56 @@ a {
     margin-left: 0;
   }
 }
+
+
+/* Threat analysis action */
+
+.threatAnalysisActions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin: 0 0 18px;
+}
+
+.threatAnalysisActions button {
+  min-height: 42px;
+  padding: 10px 16px;
+  border: 1px solid rgba(0, 200, 255, 0.42);
+  border-radius: 8px;
+  background: rgba(0, 200, 255, 0.1);
+  color: #e4f8ff;
+  font-size: 12px;
+  font-weight: 900;
+  cursor: pointer;
+  transition: 0.2s ease;
+}
+
+.threatAnalysisActions button:not(:disabled):hover {
+  transform: translateY(-2px);
+  border-color: var(--soc-cyan);
+  background: rgba(0, 200, 255, 0.18);
+  box-shadow: 0 0 22px rgba(0, 200, 255, 0.14);
+}
+
+.threatAnalysisActions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.threatAnalysisActions p {
+  margin: 0;
+  color: #9db0c5;
+  font-size: 12px;
+}
+
+@media (max-width: 560px) {
+  .threatAnalysisActions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .threatAnalysisActions button {
+    width: 100%;
+  }
+}

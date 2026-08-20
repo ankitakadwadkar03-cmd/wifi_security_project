@@ -22,11 +22,14 @@ from pathlib import Path
 DEFAULT_SCAN_CSV = Path("scan_results/wifi_scan_results.csv")
 DEFAULT_PACKET_CSV = Path("packet_logs/wifi_packets.csv")
 DEFAULT_REPORT_CSV = Path("security_reports/final_security_report.csv")
+DEFAULT_TRUSTED_CSV = Path("trusted_baseline/trusted_networks.csv")
 
 ATTACK_NORMAL = "NORMAL"
 ATTACK_ROGUE_AP = "ROGUE_AP"
 ATTACK_EVIL_TWIN = "EVIL_TWIN"
 ATTACK_SUSPICIOUS = "SUSPICIOUS"
+ATTACK_WEAK_ENCRYPTION = "WEAK_ENCRYPTION"
+ATTACK_UNKNOWN_NETWORK = "UNKNOWN_NETWORK"
 
 REPORT_BASE_COLUMNS = [
     "SSID",
@@ -62,6 +65,47 @@ def load_packet_data(packet_csv_path: str | Path = DEFAULT_PACKET_CSV) -> list[d
     return _read_csv_with_required_columns(path, ["BSSID", "Packet Type", "Source MAC", "Destination MAC"])
 
 
+def load_trusted_data(
+    trusted_csv_path: str | Path = DEFAULT_TRUSTED_CSV,
+) -> list[dict[str, str]]:
+    """Load trusted SSID/BSSID records when available."""
+    path = Path(trusted_csv_path)
+
+    if not path.exists():
+        return []
+
+    return _read_csv_with_required_columns(
+        path,
+        ["SSID", "BSSID"],
+    )
+
+
+def build_trusted_indexes(
+    trusted_rows: list[dict[str, str]],
+) -> tuple[set[str], dict[str, set[str]]]:
+    """Index trusted BSSIDs globally and by SSID."""
+    trusted_bssids: set[str] = set()
+    trusted_by_ssid: dict[str, set[str]] = defaultdict(set)
+
+    for row in trusted_rows:
+        ssid = _clean_text(
+            row.get("SSID"),
+            "",
+        ).lower()
+
+        bssid = _normalize_mac(
+            row.get("BSSID")
+        )
+
+        if not ssid or bssid in {"Unknown", "Broadcast"}:
+            continue
+
+        trusted_bssids.add(bssid)
+        trusted_by_ssid[ssid].add(bssid)
+
+    return trusted_bssids, dict(trusted_by_ssid)
+
+
 def detect_rogue_ap(
     scan_rows: list[dict[str, str]],
     packet_rows: list[dict[str, str]],
@@ -80,68 +124,281 @@ def detect_rogue_ap(
 
     return {bssid for bssid in packet_bssids - scanned_bssids if bssid not in {"Unknown", "Broadcast"}}
 
-def detect_evil_twin(report_rows: list[dict[str, str]]) -> set[str]:
-    """Return BSSIDs that look like evil twins inside same-SSID groups."""
-
+def detect_evil_twin(
+    report_rows: list[dict[str, str]],
+    trusted_by_ssid: dict[str, set[str]] | None = None,
+) -> set[str]:
+    """Return BSSIDs that conflict with trusted SSID/BSSID records."""
+    trusted_by_ssid = trusted_by_ssid or {}
     rows_by_ssid: dict[str, list[dict[str, str]]] = defaultdict(list)
+
     for row in report_rows:
-        ssid = _clean_text(row.get("SSID"), "Unknown_Device")
-        bssid = _normalize_mac(row.get("BSSID"))
-        if ssid != "Unknown_Device" and bssid not in {"Unknown", "Broadcast"}:
-            rows_by_ssid[ssid].append(row)
+        ssid = _clean_text(
+            row.get("SSID"),
+            "Unknown_Device",
+        )
+
+        bssid = _normalize_mac(
+            row.get("BSSID")
+        )
+
+        if (
+            ssid != "Unknown_Device"
+            and bssid not in {"Unknown", "Broadcast"}
+        ):
+            rows_by_ssid[ssid.lower()].append(row)
 
     evil_twin_bssids: set[str] = set()
 
-    for ssid, rows in rows_by_ssid.items():
-        unique_bssids = {_normalize_mac(row.get("BSSID")) for row in rows}
-        if len(unique_bssids) < 2:
+    for ssid_key, rows in rows_by_ssid.items():
+        trusted_bssids = trusted_by_ssid.get(
+            ssid_key,
+            set(),
+        )
+
+        if trusted_bssids:
+            for row in rows:
+                bssid = _normalize_mac(
+                    row.get("BSSID")
+                )
+
+                if bssid not in trusted_bssids:
+                    evil_twin_bssids.add(bssid)
+
+            if evil_twin_bssids.intersection(
+                {
+                    _normalize_mac(row.get("BSSID"))
+                    for row in rows
+                }
+            ):
+                print(
+                    "[POSSIBLE EVIL TWIN] "
+                    + _clean_text(
+                        rows[0].get("SSID"),
+                        "Unknown",
+                    )
+                )
+
             continue
 
-        encryptions = {_clean_text(row.get("Encryption"), "Unknown").upper() for row in rows}
-        packet_counts = [_to_int(row.get("Total_Packets")) for row in rows]
-        scores = [_to_int(row.get("Suspicious_Score"), default=100) for row in rows]
-        median_packets = _median(packet_counts)
-        average_score = sum(scores) / len(scores) if scores else 100
-
-        ssid_alerted = False
-        for row in rows:
-            bssid = _normalize_mac(row.get("BSSID"))
-            encryption_differs = len(encryptions) > 1
-            significantly_higher_packets = _to_int(row.get("Total_Packets")) >= max(50, median_packets * 2)
-            abnormal_score = abs(_to_int(row.get("Suspicious_Score"), default=100) - average_score) >= 20
-            risky_level = _clean_text(row.get("Risk_Level"), "SAFE").upper() in {"WARNING", "DANGER"}
-
-            if encryption_differs or significantly_higher_packets or abnormal_score or risky_level:
-                evil_twin_bssids.add(bssid)
-                if not ssid_alerted:
-                    print(f"[EVIL TWIN DETECTED] {ssid}")
-                    ssid_alerted = True
+        # Without a trusted baseline for this SSID, duplicate names
+        # alone are not enough to identify which BSSID is malicious.
+        # Packet/risk anomalies are handled separately as SUSPICIOUS.
 
     return evil_twin_bssids
+
+def build_detection_evidence(
+    report_row: dict[str, str],
+    attack_type: str,
+    trusted_by_ssid: dict[str, set[str]],
+) -> tuple[str, str, int]:
+    """Explain why a network received its attack classification."""
+    ssid = _clean_text(
+        report_row.get("SSID"),
+        "Unknown_Device",
+    )
+
+    bssid = _normalize_mac(
+        report_row.get("BSSID")
+    )
+
+    ssid_key = ssid.lower()
+
+    deauth_count = _to_int(
+        report_row.get("Deauth_Count")
+    )
+
+    unknown_mac_count = _to_int(
+        report_row.get("Unknown_MAC_Count")
+    )
+
+    total_packets = _to_int(
+        report_row.get("Total_Packets")
+    )
+
+    score = _to_int(
+        report_row.get("Suspicious_Score"),
+        default=100,
+    )
+
+    risk_level = _clean_text(
+        report_row.get("Risk_Level"),
+        "SAFE",
+    ).upper()
+
+    if attack_type == ATTACK_EVIL_TWIN:
+        trusted_bssids = sorted(
+            trusted_by_ssid.get(
+                ssid_key,
+                set(),
+            )
+        )
+
+        trusted_text = (
+            ", ".join(trusted_bssids)
+            if trusted_bssids
+            else "not available"
+        )
+
+        return (
+            (
+                f"SSID '{ssid}' matches a trusted network, "
+                f"but detected BSSID {bssid} is not in the "
+                f"trusted baseline. Trusted BSSID(s): "
+                f"{trusted_text}."
+            ),
+            (
+                "Verify the router identity and physical MAC/BSSID "
+                "before connecting. Treat this as a possible Evil "
+                "Twin indicator until manually verified."
+            ),
+            90,
+        )
+
+    if attack_type == ATTACK_ROGUE_AP:
+        return (
+            (
+                f"BSSID {bssid} appears unauthorized based on "
+                "the available network evidence."
+            ),
+            (
+                "Verify ownership and authorization before "
+                "treating this access point as trusted."
+            ),
+            75,
+        )
+
+    if attack_type == ATTACK_SUSPICIOUS:
+        reasons = []
+
+        if deauth_count > 0:
+            reasons.append(
+                f"{deauth_count} deauthentication packet(s)"
+            )
+
+        if unknown_mac_count > 0:
+            reasons.append(
+                f"{unknown_mac_count} unknown-MAC event(s)"
+            )
+
+        if total_packets >= 1000:
+            reasons.append(
+                f"high packet volume ({total_packets})"
+            )
+
+        if risk_level in {
+            "LOW RISK",
+            "WARNING",
+            "DANGER",
+        }:
+            reasons.append(
+                f"risk level {risk_level}"
+            )
+
+        if score < 80:
+            reasons.append(
+                f"security score {score}"
+            )
+
+        reason_text = (
+            ", ".join(reasons)
+            if reasons
+            else "packet or risk anomalies"
+        )
+
+        return (
+            (
+                "Suspicious wireless behavior was detected: "
+                f"{reason_text}."
+            ),
+            (
+                "Review packet evidence and repeat monitoring "
+                "to determine whether the activity is expected."
+            ),
+            70,
+        )
+
+    if attack_type == ATTACK_WEAK_ENCRYPTION:
+        encryption = _clean_text(
+            report_row.get("Encryption"),
+            "Unknown",
+        )
+
+        return (
+            (
+                f"Network uses {encryption} encryption, "
+                "which does not provide adequate WiFi security."
+            ),
+            (
+                "Avoid sensitive activity on this network. "
+                "Use WPA2 or WPA3 encryption when possible."
+            ),
+            65,
+        )
+
+    if attack_type == ATTACK_UNKNOWN_NETWORK:
+        return (
+            (
+                f"SSID '{ssid}' and BSSID {bssid} are not present "
+                "in the trusted network baseline."
+            ),
+            (
+                "Verify whether this access point is authorized in "
+                "the monitored area. Add it to the trusted baseline "
+                "only after confirming that it is legitimate."
+            ),
+            55,
+        )
+
+    return (
+        "No significant threat indicators were detected.",
+        "Continue normal monitoring.",
+        10,
+    )
 
 
 def classify_attack(
     report_row: dict[str, str],
     rogue_bssids: set[str],
     evil_twin_bssids: set[str],
+    trusted_bssids: set[str],
 ) -> str:
-    """Classify one network as NORMAL, ROGUE_AP, EVIL_TWIN, or SUSPICIOUS."""
+    """Classify one network using identity, packet, encryption and baseline evidence."""
 
-    bssid = _normalize_mac(report_row.get("BSSID"))
+    bssid = _normalize_mac(
+        report_row.get("BSSID")
+    )
 
     if bssid in rogue_bssids:
         return ATTACK_ROGUE_AP
+
     if bssid in evil_twin_bssids:
         return ATTACK_EVIL_TWIN
+
     if _has_packet_anomalies(report_row):
         return ATTACK_SUSPICIOUS
-    return ATTACK_NORMAL
 
+    encryption = _clean_text(
+        report_row.get("Encryption"),
+        "Unknown",
+    ).upper()
+
+    if encryption in {"OPEN", "WEP"}:
+        return ATTACK_WEAK_ENCRYPTION
+
+    if (
+        bssid not in {"Unknown", "Broadcast"}
+        and bssid not in trusted_bssids
+    ):
+        return ATTACK_UNKNOWN_NETWORK
+
+    return ATTACK_NORMAL
 
 def update_security_report(
     scan_csv_path: str | Path = DEFAULT_SCAN_CSV,
     packet_csv_path: str | Path = DEFAULT_PACKET_CSV,
     report_csv_path: str | Path = DEFAULT_REPORT_CSV,
+    trusted_csv_path: str | Path = DEFAULT_TRUSTED_CSV,
 ) -> list[dict[str, str]] | None:
     """Append/update Attack_Type in Module 4 security report."""
 
@@ -156,21 +413,67 @@ def update_security_report(
         print(f"[WARNING] Security report missing: {report_path}")
         return None
 
-    report_rows = _read_csv_with_required_columns(report_path, REPORT_BASE_COLUMNS)
-    rogue_bssids = detect_rogue_ap(scan_rows, packet_rows)
-    report_rows = _add_missing_rogue_rows(report_rows, packet_rows, rogue_bssids)
-    evil_twin_bssids = detect_evil_twin(report_rows)
+    report_rows = _read_csv_with_required_columns(
+        report_path,
+        REPORT_BASE_COLUMNS,
+    )
 
-    for bssid in sorted(rogue_bssids):
-        print(f"[ROGUE AP DETECTED] {bssid}")
+    trusted_rows = load_trusted_data(
+        trusted_csv_path
+    )
+
+    trusted_bssids, trusted_by_ssid = (
+        build_trusted_indexes(trusted_rows)
+    )
+
+    # A packet-only BSSID can simply be an AP missed by the latest
+    # scanner sweep, so it is not enough evidence for ROGUE_AP.
+    rogue_bssids: set[str] = set()
+
+    evil_twin_bssids = detect_evil_twin(
+        report_rows,
+        trusted_by_ssid,
+    )
 
     updated_rows: list[dict[str, str]] = []
+
     for row in report_rows:
         updated_row = dict(row)
-        updated_row["Attack_Type"] = classify_attack(updated_row, rogue_bssids, evil_twin_bssids)
+
+        attack_type = classify_attack(
+            updated_row,
+            rogue_bssids,
+            evil_twin_bssids,
+            trusted_bssids,
+        )
+
+        (
+            detection_reason,
+            recommended_action,
+            confidence,
+        ) = build_detection_evidence(
+            updated_row,
+            attack_type,
+            trusted_by_ssid,
+        )
+
+        updated_row["Attack_Type"] = attack_type
+        updated_row["Detection_Reason"] = detection_reason
+        updated_row["Recommended_Action"] = recommended_action
+        updated_row["Confidence"] = str(confidence)
+
         updated_rows.append(updated_row)
 
-    fieldnames = _merge_fieldnames(report_rows, REPORT_BASE_COLUMNS + ["Attack_Type"])
+    fieldnames = _merge_fieldnames(
+        report_rows,
+        REPORT_BASE_COLUMNS
+        + [
+            "Attack_Type",
+            "Detection_Reason",
+            "Recommended_Action",
+            "Confidence",
+        ],
+    )
     report_path.parent.mkdir(parents=True, exist_ok=True)
     with report_path.open("w", newline="", encoding="utf-8") as csv_file:
         writer = csv.DictWriter(csv_file, fieldnames=fieldnames, extrasaction="ignore")
@@ -327,6 +630,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--scan-csv", default=str(DEFAULT_SCAN_CSV), help="Module 1 scan CSV path.")
     parser.add_argument("--packet-csv", default=str(DEFAULT_PACKET_CSV), help="Module 2 packet CSV path.")
     parser.add_argument("--report-csv", default=str(DEFAULT_REPORT_CSV), help="Security report CSV path to update.")
+    parser.add_argument(
+        "--trusted-csv",
+        default=str(DEFAULT_TRUSTED_CSV),
+        help="Trusted SSID/BSSID baseline CSV path.",
+    )
     return parser.parse_args()
 
 
@@ -336,6 +644,7 @@ def main() -> int:
         scan_csv_path=args.scan_csv,
         packet_csv_path=args.packet_csv,
         report_csv_path=args.report_csv,
+        trusted_csv_path=args.trusted_csv,
     )
     return 0 if updated_rows is not None else 1
 

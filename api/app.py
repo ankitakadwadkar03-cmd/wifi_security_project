@@ -7,6 +7,7 @@ import signal
 import sys
 import threading
 import time
+import tempfile
 import sqlite3
 import shutil
 import subprocess
@@ -36,6 +37,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 NETWORK_CSV = PROJECT_ROOT / "scan_results" / "wifi_scan_results.csv"
 SCANNER_STATUS_JSON = PROJECT_ROOT / "scan_results" / "scanner_status.json"
 SECURITY_REPORT_CSV = PROJECT_ROOT / "security_reports" / "final_security_report.csv"
+TRUSTED_NETWORKS_CSV = PROJECT_ROOT / "trusted_baseline" / "trusted_networks.csv"
 REPORTS_DIRECTORY = PROJECT_ROOT / "security_reports"
 HISTORY_DB = PROJECT_ROOT / "security_reports" / "history.db"
 ALLOWED_REPORT_EXTENSIONS = {".csv", ".json", ".txt", ".log"}
@@ -661,15 +663,26 @@ def read_threats() -> list[dict]:
             ).strip().upper()
 
             severity = {
-                "DANGER": "Critical",
-                "WARNING": "High",
-                "LOW RISK": "Medium",
-            }.get(risk_level, "Review")
+                "EVIL_TWIN": "Critical",
+                "ROGUE_AP": "High",
+                "SUSPICIOUS": "Medium",
+                "WEAK_ENCRYPTION": "Medium",
+                "UNKNOWN_NETWORK": "Review",
+            }.get(
+                attack_type,
+                {
+                    "DANGER": "Critical",
+                    "WARNING": "High",
+                    "LOW RISK": "Medium",
+                }.get(risk_level, "Review"),
+            )
 
             title = {
                 "ROGUE_AP": "Potential Rogue Access Point",
                 "EVIL_TWIN": "Potential Evil Twin Network",
                 "SUSPICIOUS": "Suspicious Wireless Activity",
+                "WEAK_ENCRYPTION": "Weak WiFi Encryption",
+                "UNKNOWN_NETWORK": "Unverified Network",
             }.get(attack_type, "Wireless Security Finding")
 
             findings.append(
@@ -698,15 +711,99 @@ def read_threats() -> list[dict]:
                     "attack_type": attack_type,
                     "severity": severity,
                     "title": title,
+                    "confidence": _safe_int(
+                        row.get("Confidence"),
+                        default=0,
+                    ),
+                    "detection_reason": (
+                        row.get("Detection_Reason")
+                        or ""
+                    ).strip(),
+                    "recommended_action": (
+                        row.get("Recommended_Action")
+                        or ""
+                    ).strip(),
                     "summary": (
-                        "This is a potential finding produced by automated "
-                        "wireless analysis. Verify the BSSID and compare it "
-                        "with trusted network records before taking action."
+                        (
+                            row.get("Detection_Reason")
+                            or ""
+                        ).strip()
+                        or (
+                            "This is a potential finding produced by "
+                            "automated wireless analysis. Verify the "
+                            "BSSID and compare it with trusted network "
+                            "records before taking action."
+                        )
                     ),
                 }
             )
 
     return findings
+
+
+def get_threat_report_status() -> dict:
+    """Check whether the saved threat report matches current inputs."""
+
+    if not SECURITY_REPORT_CSV.exists():
+        return {
+            "status": "missing",
+            "analysis_required": True,
+            "stale_sources": [],
+            "message": (
+                "No threat analysis report exists yet. "
+                "Run Threat Analysis to generate one."
+            ),
+        }
+
+    try:
+        report_mtime = SECURITY_REPORT_CSV.stat().st_mtime
+    except OSError:
+        return {
+            "status": "unavailable",
+            "analysis_required": True,
+            "stale_sources": [],
+            "message": (
+                "Threat report freshness could not be verified. "
+                "Run Threat Analysis again."
+            ),
+        }
+
+    source_files = [
+        ("WiFi scan", NETWORK_CSV),
+        ("packet capture", PACKET_LOG_CSV),
+        ("trusted baseline", TRUSTED_NETWORKS_CSV),
+    ]
+
+    stale_sources = []
+
+    for label, source_path in source_files:
+        if not source_path.exists():
+            continue
+
+        try:
+            if source_path.stat().st_mtime > report_mtime:
+                stale_sources.append(label)
+        except OSError:
+            continue
+
+    if stale_sources:
+        return {
+            "status": "stale",
+            "analysis_required": True,
+            "stale_sources": stale_sources,
+            "message": (
+                "Saved threat findings are older than current "
+                + ", ".join(stale_sources)
+                + ". Run Threat Analysis again."
+            ),
+        }
+
+    return {
+        "status": "current",
+        "analysis_required": False,
+        "stale_sources": [],
+        "message": "Threat analysis report is current.",
+    }
 
 
 def _format_file_size(size_bytes: int) -> str:
@@ -1861,6 +1958,268 @@ def packets():
     )
 
 
+def _write_latest_capture_session_csv(
+    output_path: Path,
+) -> int:
+    """Write only the latest capture session to a temporary CSV."""
+    progress = read_capture_progress()
+    session_start_row = max(
+        0,
+        _safe_int(
+            progress.get("session_start_row"),
+            default=0,
+        ),
+    )
+
+    if not PACKET_LOG_CSV.exists():
+        raise FileNotFoundError(
+            "Packet log does not exist."
+        )
+
+    with PACKET_LOG_CSV.open(
+        "r",
+        encoding="utf-8",
+        newline="",
+    ) as source_file:
+        reader = csv.DictReader(source_file)
+
+        if not reader.fieldnames:
+            raise RuntimeError(
+                "Packet log has no CSV headers."
+            )
+
+        rows = [
+            dict(row)
+            for row_index, row in enumerate(reader)
+            if row_index >= session_start_row
+        ]
+
+        output_path.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        with output_path.open(
+            "w",
+            encoding="utf-8",
+            newline="",
+        ) as output_file:
+            writer = csv.DictWriter(
+                output_file,
+                fieldnames=reader.fieldnames,
+            )
+            writer.writeheader()
+            writer.writerows(rows)
+
+    return len(rows)
+
+
+def run_threat_analysis() -> tuple[dict, int]:
+    """Generate a fresh threat report from the latest completed data."""
+    scanner_status = read_scanner_status()
+    capture_status = read_capture_status()
+
+    if scanner_status.get("running"):
+        return {
+            "ok": False,
+            "state": "scanner_running",
+            "message": (
+                "Stop WiFi scanning before running threat analysis."
+            ),
+        }, 409
+
+    if capture_status.get("running"):
+        return {
+            "ok": False,
+            "state": "capture_running",
+            "message": (
+                "Stop packet capture before running threat analysis."
+            ),
+        }, 409
+
+    if not NETWORK_CSV.exists():
+        return {
+            "ok": False,
+            "state": "scan_data_missing",
+            "message": (
+                "No WiFi scan results are available. "
+                "Run the WiFi scanner first."
+            ),
+        }, 409
+
+    if not PACKET_LOG_CSV.exists():
+        return {
+            "ok": False,
+            "state": "packet_data_missing",
+            "message": (
+                "No packet log is available. "
+                "Run packet capture first."
+            ),
+        }, 409
+
+    REPORTS_DIRECTORY.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix="netshield-threat-",
+            dir=REPORTS_DIRECTORY,
+        ) as temp_directory:
+            temp_directory = Path(temp_directory)
+
+            session_packet_csv = (
+                temp_directory
+                / "latest_capture_session.csv"
+            )
+
+            temporary_report = (
+                temp_directory
+                / "final_security_report.csv"
+            )
+
+            session_packet_count = (
+                _write_latest_capture_session_csv(
+                    session_packet_csv
+                )
+            )
+
+            module_4 = subprocess.run(
+                [
+                    sys.executable,
+                    str(
+                        PROJECT_ROOT
+                        / "report_generator"
+                        / "security_report_generator.py"
+                    ),
+                    "--scan-csv",
+                    str(NETWORK_CSV),
+                    "--packet-csv",
+                    str(session_packet_csv),
+                    "--report-csv",
+                    str(temporary_report),
+                ],
+                cwd=PROJECT_ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+            if module_4.returncode != 0:
+                return {
+                    "ok": False,
+                    "state": "report_generation_failed",
+                    "message": (
+                        module_4.stderr.strip()
+                        or module_4.stdout.strip()
+                        or "Security report generation failed."
+                    ),
+                }, 500
+
+            module_5 = subprocess.run(
+                [
+                    sys.executable,
+                    str(
+                        PROJECT_ROOT
+                        / "evil_twin_detection"
+                        / "evil_twin_detector.py"
+                    ),
+                    "--scan-csv",
+                    str(NETWORK_CSV),
+                    "--packet-csv",
+                    str(session_packet_csv),
+                    "--report-csv",
+                    str(temporary_report),
+                    "--trusted-csv",
+                    str(TRUSTED_NETWORKS_CSV),
+                ],
+                cwd=PROJECT_ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+            if module_5.returncode != 0:
+                return {
+                    "ok": False,
+                    "state": "attack_classification_failed",
+                    "message": (
+                        module_5.stderr.strip()
+                        or module_5.stdout.strip()
+                        or "Attack classification failed."
+                    ),
+                }, 500
+
+            if not temporary_report.exists():
+                return {
+                    "ok": False,
+                    "state": "report_missing",
+                    "message": (
+                        "Threat analysis completed without "
+                        "producing a report."
+                    ),
+                }, 500
+
+            with temporary_report.open(
+                "r",
+                encoding="utf-8",
+                newline="",
+            ) as report_file:
+                reader = csv.DictReader(report_file)
+                report_rows = list(reader)
+                report_fields = reader.fieldnames or []
+
+            if "Attack_Type" not in report_fields:
+                return {
+                    "ok": False,
+                    "state": "classification_missing",
+                    "message": (
+                        "Threat analysis did not produce "
+                        "Attack_Type classifications."
+                    ),
+                }, 500
+
+            temporary_report.replace(
+                SECURITY_REPORT_CSV
+            )
+
+    except subprocess.TimeoutExpired:
+        return {
+            "ok": False,
+            "state": "analysis_timeout",
+            "message": "Threat analysis timed out.",
+        }, 500
+
+    except (OSError, RuntimeError) as exc:
+        return {
+            "ok": False,
+            "state": "analysis_error",
+            "message": str(exc),
+        }, 500
+
+    findings = read_threats()
+
+    return {
+        "ok": True,
+        "state": "completed",
+        "message": "Threat analysis completed successfully.",
+        "session_packet_count": session_packet_count,
+        "network_count": len(report_rows),
+        "finding_count": len(findings),
+        "report": "final_security_report.csv",
+        "findings": findings,
+    }, 200
+
+
+@app.post("/api/threats/analyze")
+def analyze_threats():
+    response, status_code = run_threat_analysis()
+    return jsonify(response), status_code
+
+
 @app.get("/api/alerts/history")
 def alert_history():
     limit = request.args.get(
@@ -1902,7 +2261,13 @@ def threats():
     if live_alerts:
         save_packet_alert_history(live_alerts)
 
-    report_findings = read_threats()
+    report_status = get_threat_report_status()
+
+    report_findings = (
+        read_threats()
+        if report_status["status"] == "current"
+        else []
+    )
 
     threat_rows = live_alerts + report_findings
 
@@ -1915,6 +2280,14 @@ def threats():
             ],
             "live_alert_count": len(live_alerts),
             "report_finding_count": len(report_findings),
+            "report_status": report_status["status"],
+            "analysis_required": report_status[
+                "analysis_required"
+            ],
+            "stale_sources": report_status[
+                "stale_sources"
+            ],
+            "report_message": report_status["message"],
             "threats": threat_rows,
         }
     )
