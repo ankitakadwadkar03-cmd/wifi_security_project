@@ -29,6 +29,7 @@ ATTACK_ROGUE_AP = "ROGUE_AP"
 ATTACK_EVIL_TWIN = "EVIL_TWIN"
 ATTACK_SUSPICIOUS = "SUSPICIOUS"
 ATTACK_WEAK_ENCRYPTION = "WEAK_ENCRYPTION"
+ATTACK_UNKNOWN_NETWORK = "UNKNOWN_NETWORK"
 
 REPORT_BASE_COLUMNS = [
     "SSID",
@@ -335,6 +336,20 @@ def build_detection_evidence(
             65,
         )
 
+    if attack_type == ATTACK_UNKNOWN_NETWORK:
+        return (
+            (
+                f"SSID '{ssid}' and BSSID {bssid} are not present "
+                "in the trusted network baseline."
+            ),
+            (
+                "Verify whether this access point is authorized in "
+                "the monitored area. Add it to the trusted baseline "
+                "only after confirming that it is legitimate."
+            ),
+            55,
+        )
+
     return (
         "No significant threat indicators were detected.",
         "Continue normal monitoring.",
@@ -346,8 +361,9 @@ def classify_attack(
     report_row: dict[str, str],
     rogue_bssids: set[str],
     evil_twin_bssids: set[str],
+    trusted_bssids: set[str],
 ) -> str:
-    """Classify one network using identity, packet, and encryption evidence."""
+    """Classify one network using identity, packet, encryption and baseline evidence."""
 
     bssid = _normalize_mac(
         report_row.get("BSSID")
@@ -369,6 +385,12 @@ def classify_attack(
 
     if encryption in {"OPEN", "WEP"}:
         return ATTACK_WEAK_ENCRYPTION
+
+    if (
+        bssid not in {"Unknown", "Broadcast"}
+        and bssid not in trusted_bssids
+    ):
+        return ATTACK_UNKNOWN_NETWORK
 
     return ATTACK_NORMAL
 
@@ -400,7 +422,7 @@ def update_security_report(
         trusted_csv_path
     )
 
-    _trusted_bssids, trusted_by_ssid = (
+    trusted_bssids, trusted_by_ssid = (
         build_trusted_indexes(trusted_rows)
     )
 
@@ -422,6 +444,7 @@ def update_security_report(
             updated_row,
             rogue_bssids,
             evil_twin_bssids,
+            trusted_bssids,
         )
 
         (
