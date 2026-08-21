@@ -35,52 +35,132 @@ export default function HistoryPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
-  useEffect(() => {
-    const controller = new AbortController();
+  const [archiveLoading, setArchiveLoading] = useState(false);
+  const [archiveMessage, setArchiveMessage] = useState("");
+  const [archiveError, setArchiveError] = useState("");
 
-    async function loadHistory() {
-      try {
-        setLoading(true);
-        setError("");
+  async function loadHistory(signal) {
+    try {
+      setLoading(true);
+      setError("");
 
-        const response = await fetch(`${API_BASE_URL}/api/history`, {
-          signal: controller.signal,
-        });
+      const response = await fetch(
+        `${API_BASE_URL}/api/history`,
+        signal ? { signal } : undefined
+      );
 
-        if (!response.ok) {
-          throw new Error(`Backend returned HTTP ${response.status}`);
-        }
+      if (!response.ok) {
+        throw new Error(
+          `Backend returned HTTP ${response.status}`
+        );
+      }
 
-        const data = await response.json();
-        setHistory(data);
-      } catch (fetchError) {
-        if (fetchError.name !== "AbortError") {
-          console.error("Failed to load history:", fetchError);
-          setError(
-            "Unable to connect to the History API. Start the Flask backend and refresh this page."
-          );
-        }
-      } finally {
+      const data = await response.json();
+
+      setHistory(data);
+    } catch (fetchError) {
+      if (fetchError.name !== "AbortError") {
+        console.error(
+          "Failed to load history:",
+          fetchError
+        );
+
+        setError(
+          "Unable to connect to the History API. " +
+            "Start the Flask backend and refresh this page."
+        );
+      }
+    } finally {
+      if (!signal?.aborted) {
         setLoading(false);
       }
     }
+  }
 
-    loadHistory();
+  useEffect(() => {
+    const controller = new AbortController();
+
+    loadHistory(controller.signal);
 
     return () => controller.abort();
   }, []);
 
+  async function archiveLegacyHistory() {
+    if (
+      archiveLoading ||
+      !history?.archive_legacy_url
+    ) {
+      return;
+    }
+
+    try {
+      setArchiveLoading(true);
+      setArchiveMessage("");
+      setArchiveError("");
+
+      const response = await fetch(
+        `${API_BASE_URL}${history.archive_legacy_url}`,
+        {
+          method: "POST",
+        }
+      );
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          data.message ||
+            `Legacy history archive returned HTTP ${response.status}`
+        );
+      }
+
+      setArchiveMessage(
+        `${data.message} Archived: ${
+          Array.isArray(data.archived_files)
+            ? data.archived_files.join(", ")
+            : "legacy history files"
+        }.`
+      );
+
+      await loadHistory();
+    } catch (archiveRequestError) {
+      console.error(
+        "Legacy history archive failed:",
+        archiveRequestError
+      );
+
+      setArchiveError(
+        archiveRequestError.message ||
+          "Legacy history could not be archived."
+      );
+
+      await loadHistory();
+    } finally {
+      setArchiveLoading(false);
+    }
+  }
+
   const latest = history?.latest;
-  const summaries = Array.isArray(history?.summaries)
+
+  const summaries = Array.isArray(
+    history?.summaries
+  )
     ? history.summaries
     : [];
+
   const trends = history?.trends || {};
+
+  const legacyHistory =
+    history?.history_status === "legacy" &&
+    history?.migration_required;
 
   return (
     <section className="appPage historyPage">
       <div className="pageHeader">
         <span>Historical Analysis</span>
+
         <h1>History</h1>
+
         <p>
           Compare saved WiFi scans, monitor security trends, and understand
           how the wireless environment changed between analyses.
@@ -99,11 +179,58 @@ export default function HistoryPage() {
         </div>
       )}
 
-      {!loading && !error && !latest && (
+      {!loading && !error && legacyHistory && (
         <div className="networkTableMessage">
-          No historical scans are currently stored.
+          <strong>Legacy history detected.</strong>
+
+          <br />
+
+          {history.message ||
+            "Older history was created before the current baseline-aware threat-detection logic."}
+
+          <br />
+          <br />
+
+          The old history will be preserved in an archive. It will not be
+          mixed with the new baseline-aware NetShield timeline.
+
+          <br />
+          <br />
+
+          <button
+            type="button"
+            className="primaryButton"
+            onClick={archiveLegacyHistory}
+            disabled={archiveLoading}
+          >
+            {archiveLoading
+              ? "Archiving..."
+              : "Archive Legacy History"}
+          </button>
         </div>
       )}
+
+      {archiveMessage && (
+        <p className="scannerActionMessage">
+          {archiveMessage}
+        </p>
+      )}
+
+      {archiveError && (
+        <p className="scannerActionMessage errorMessage">
+          {archiveError}
+        </p>
+      )}
+
+      {!loading &&
+        !error &&
+        !legacyHistory &&
+        !latest && (
+          <div className="networkTableMessage">
+            {history?.message ||
+              "No historical scans are currently stored."}
+          </div>
+        )}
 
       {!loading && !error && latest && (
         <>
@@ -112,32 +239,58 @@ export default function HistoryPage() {
               <div className="historyValue">
                 {history.scan_count}
               </div>
+
               <h2>Saved Scans</h2>
-              <p>Completed scan summaries stored in the history database.</p>
+
+              <p>
+                Completed scan summaries stored in the history database.
+              </p>
             </div>
 
             <div className="historyCard">
               <div className="historyValue">
                 {latest.total_networks}
               </div>
+
               <h2>Latest Networks</h2>
-              <p>{formatTrend(trends.network_change)}</p>
+
+              <p>
+                {formatTrend(
+                  trends.network_change
+                )}
+              </p>
             </div>
 
             <div className="historyCard">
               <div className="historyValue">
-                {Number(latest.average_security_score).toFixed(0)}%
+                {Number(
+                  latest.average_security_score
+                ).toFixed(0)}
+                %
               </div>
+
               <h2>Average Score</h2>
-              <p>{formatTrend(trends.score_change, " points")}</p>
+
+              <p>
+                {formatTrend(
+                  trends.score_change,
+                  " points"
+                )}
+              </p>
             </div>
 
             <div className="historyCard">
               <div className="historyValue">
                 {latest.potential_findings}
               </div>
+
               <h2>Potential Findings</h2>
-              <p>{formatTrend(trends.finding_change)}</p>
+
+              <p>
+                {formatTrend(
+                  trends.finding_change
+                )}
+              </p>
             </div>
           </div>
 
@@ -159,21 +312,50 @@ export default function HistoryPage() {
                   </strong>
 
                   <p className="timelineDate">
-                    {formatTimestamp(scan.scan_timestamp)}
+                    {formatTimestamp(
+                      scan.scan_timestamp
+                    )}
                   </p>
 
                   <p>
                     {scan.total_networks} networks,{" "}
                     {scan.potential_findings} potential findings,{" "}
-                    {Number(scan.average_security_score).toFixed(0)}%
-                    average security score.
+                    {Number(
+                      scan.average_security_score
+                    ).toFixed(0)}
+                    % average security score.
                   </p>
 
                   <div className="historyScanDetails">
-                    <span>Safe: {scan.safe_count}</span>
-                    <span>Rogue candidates: {scan.rogue_count}</span>
-                    <span>Evil-twin candidates: {scan.evil_twin_count}</span>
-                    <span>Warnings: {scan.warning_count}</span>
+                    <span>
+                      Safe: {scan.safe_count}
+                    </span>
+
+                    <span>
+                      Rogue candidates: {scan.rogue_count}
+                    </span>
+
+                    <span>
+                      Evil-twin candidates: {scan.evil_twin_count}
+                    </span>
+
+                    <span>
+                      Suspicious: {scan.suspicious_count ?? 0}
+                    </span>
+
+                    <span>
+                      Weak encryption:{" "}
+                      {scan.weak_encryption_count ?? 0}
+                    </span>
+
+                    <span>
+                      Unverified networks:{" "}
+                      {scan.unknown_network_count ?? 0}
+                    </span>
+
+                    <span>
+                      Warnings: {scan.warning_count}
+                    </span>
                   </div>
                 </div>
               </div>
