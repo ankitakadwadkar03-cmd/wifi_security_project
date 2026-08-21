@@ -6265,3 +6265,116 @@ a {
     width: 100%;
   }
 }
+
+
+/* =========================================
+   SECURITY ADVISOR - REPORTS PAGE
+   ========================================= */
+
+.reportsPage .advisorGenerationPanel {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(250px, 0.8fr);
+  gap: 24px;
+  align-items: center;
+  margin-bottom: 26px;
+  padding: 24px;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  background:
+    radial-gradient(
+      circle at 88% 18%,
+      rgba(56, 189, 248, 0.12),
+      transparent 38%
+    ),
+    rgba(15, 23, 42, 0.74);
+}
+
+.reportsPage .advisorGenerationContent {
+  display: grid;
+  gap: 18px;
+}
+
+.reportsPage .advisorGenerationLabel {
+  color: var(--blue);
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.reportsPage .advisorGenerationContent h2 {
+  margin: 7px 0 8px;
+  color: white;
+  font-size: 25px;
+}
+
+.reportsPage .advisorGenerationContent p,
+.reportsPage .advisorGenerationActions p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.reportsPage .advisorGenerationStatus {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.reportsPage .advisorGenerationStatus > span:last-child {
+  color: #a8bbcf;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.reportsPage .advisorGenerationActions {
+  display: grid;
+  gap: 12px;
+}
+
+.reportsPage .advisorGenerationActions .primaryButton {
+  width: 100%;
+  cursor: pointer;
+}
+
+.reportsPage .advisorGenerationActions .primaryButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+  transform: none;
+}
+
+.reportsPage .reportFreshness {
+  display: grid;
+  gap: 5px;
+  margin: 0 0 14px;
+  padding: 11px 12px;
+  border: 1px solid rgba(56, 189, 248, 0.22);
+  border-radius: 10px;
+  background: rgba(56, 189, 248, 0.06);
+}
+
+.reportsPage .reportFreshness strong {
+  color: #d9f5ff;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.reportsPage .reportFreshness span {
+  color: #91a8be;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.reportsPage .reportFreshnessWarning {
+  border-color: rgba(245, 158, 11, 0.3);
+  background: rgba(245, 158, 11, 0.06);
+}
+
+@media (max-width: 850px) {
+  .reportsPage .advisorGenerationPanel {
+    grid-template-columns: 1fr;
+  }
+}
