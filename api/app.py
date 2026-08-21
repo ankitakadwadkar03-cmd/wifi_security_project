@@ -39,6 +39,14 @@ SCANNER_STATUS_JSON = PROJECT_ROOT / "scan_results" / "scanner_status.json"
 SECURITY_REPORT_CSV = PROJECT_ROOT / "security_reports" / "final_security_report.csv"
 TRUSTED_NETWORKS_CSV = PROJECT_ROOT / "trusted_baseline" / "trusted_networks.csv"
 REPORTS_DIRECTORY = PROJECT_ROOT / "security_reports"
+SECURITY_ADVISOR_TEXT = (
+    REPORTS_DIRECTORY
+    / "security_advisor_report.txt"
+)
+SECURITY_ADVISOR_JSON = (
+    REPORTS_DIRECTORY
+    / "security_advisor_report.json"
+)
 HISTORY_DB = PROJECT_ROOT / "security_reports" / "history.db"
 ALLOWED_REPORT_EXTENSIONS = {".csv", ".json", ".txt", ".log"}
 
@@ -806,6 +814,113 @@ def get_threat_report_status() -> dict:
     }
 
 
+def get_security_advisor_status() -> dict:
+    """Check whether saved Security Advisor reports are current."""
+
+    advisor_files = [
+        SECURITY_ADVISOR_TEXT,
+        SECURITY_ADVISOR_JSON,
+    ]
+
+    existing_files = [
+        path
+        for path in advisor_files
+        if path.exists()
+    ]
+
+    if not existing_files:
+        return {
+            "status": "missing",
+            "generation_required": True,
+            "threat_analysis_required": (
+                get_threat_report_status()[
+                    "analysis_required"
+                ]
+            ),
+            "message": (
+                "No Security Advisor report exists yet. "
+                "Generate Security Advisor after completing "
+                "current Threat Analysis."
+            ),
+        }
+
+    if len(existing_files) != len(advisor_files):
+        return {
+            "status": "incomplete",
+            "generation_required": True,
+            "threat_analysis_required": (
+                get_threat_report_status()[
+                    "analysis_required"
+                ]
+            ),
+            "message": (
+                "Security Advisor report files are incomplete. "
+                "Generate Security Advisor again."
+            ),
+        }
+
+    threat_status = get_threat_report_status()
+
+    if threat_status["status"] != "current":
+        return {
+            "status": "stale",
+            "generation_required": True,
+            "threat_analysis_required": True,
+            "message": (
+                "Saved Security Advisor reports cannot be "
+                "treated as current because the Threat Analysis "
+                "report is not current. "
+                + threat_status["message"]
+            ),
+        }
+
+    try:
+        source_mtime = (
+            SECURITY_REPORT_CSV.stat().st_mtime_ns
+        )
+
+        advisor_mtimes = [
+            advisor_path.stat().st_mtime_ns
+            for advisor_path in advisor_files
+        ]
+
+    except OSError as exc:
+        return {
+            "status": "unavailable",
+            "generation_required": True,
+            "threat_analysis_required": False,
+            "message": (
+                "Security Advisor freshness could not be "
+                "verified: "
+                + str(exc)
+            ),
+        }
+
+    if any(
+        advisor_mtime < source_mtime
+        for advisor_mtime in advisor_mtimes
+    ):
+        return {
+            "status": "stale",
+            "generation_required": True,
+            "threat_analysis_required": False,
+            "message": (
+                "Saved Security Advisor reports are older than "
+                "the current Threat Analysis report. "
+                "Generate Security Advisor again."
+            ),
+        }
+
+    return {
+        "status": "current",
+        "generation_required": False,
+        "threat_analysis_required": False,
+        "message": (
+            "Security Advisor reports are current."
+        ),
+    }
+
+
 def _format_file_size(size_bytes: int) -> str:
     """Convert bytes into a readable file-size label."""
     if size_bytes < 1024:
@@ -892,6 +1007,12 @@ def read_reports() -> list[dict]:
         return []
 
     report_rows: list[dict] = []
+    advisor_status = get_security_advisor_status()
+
+    advisor_filenames = {
+        SECURITY_ADVISOR_TEXT.name,
+        SECURITY_ADVISOR_JSON.name,
+    }
 
     for report_path in REPORTS_DIRECTORY.iterdir():
         if not report_path.is_file():
@@ -903,25 +1024,45 @@ def read_reports() -> list[dict]:
 
         stat = report_path.stat()
 
-        report_rows.append(
-            {
-                "filename": report_path.name,
-                "title": report_path.stem.replace("_", " ").title(),
-                "type": extension.removeprefix(".").upper(),
-                "category": _report_category(report_path.name),
-                "description": _report_description(report_path.name),
-                "size_bytes": stat.st_size,
-                "size": _format_file_size(stat.st_size),
-                "modified_at": datetime.fromtimestamp(
-                    stat.st_mtime,
-                    tz=timezone.utc,
-                ).isoformat(),
-                "view_url": f"/api/reports/view/{report_path.name}",
-                "download_url": (
-                    f"/api/reports/download/{report_path.name}"
-                ),
-            }
-        )
+        report_row = {
+            "filename": report_path.name,
+            "title": report_path.stem.replace("_", " ").title(),
+            "type": extension.removeprefix(".").upper(),
+            "category": _report_category(report_path.name),
+            "description": _report_description(report_path.name),
+            "size_bytes": stat.st_size,
+            "size": _format_file_size(stat.st_size),
+            "modified_at": datetime.fromtimestamp(
+                stat.st_mtime,
+                tz=timezone.utc,
+            ).isoformat(),
+            "view_url": f"/api/reports/view/{report_path.name}",
+            "download_url": (
+                f"/api/reports/download/{report_path.name}"
+            ),
+        }
+
+        if report_path.name in advisor_filenames:
+            report_row.update(
+                {
+                    "freshness_status": advisor_status[
+                        "status"
+                    ],
+                    "generation_required": advisor_status[
+                        "generation_required"
+                    ],
+                    "threat_analysis_required": (
+                        advisor_status[
+                            "threat_analysis_required"
+                        ]
+                    ),
+                    "freshness_message": advisor_status[
+                        "message"
+                    ],
+                }
+            )
+
+        report_rows.append(report_row)
 
     return sorted(
         report_rows,
@@ -2214,6 +2355,310 @@ def run_threat_analysis() -> tuple[dict, int]:
     }, 200
 
 
+def run_security_advisor() -> tuple[dict, int]:
+    """Generate Security Advisor reports from current threat analysis."""
+
+    report_status = get_threat_report_status()
+
+    if report_status["status"] != "current":
+        return {
+            "ok": False,
+            "state": "threat_analysis_required",
+            "message": report_status["message"],
+            "report_status": report_status["status"],
+            "analysis_required": True,
+            "stale_sources": report_status[
+                "stale_sources"
+            ],
+        }, 409
+
+    try:
+        source_report_mtime = (
+            SECURITY_REPORT_CSV.stat().st_mtime_ns
+        )
+    except OSError as exc:
+        return {
+            "ok": False,
+            "state": "report_unavailable",
+            "message": (
+                "Threat report could not be accessed: "
+                + str(exc)
+            ),
+        }, 500
+
+    REPORTS_DIRECTORY.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix="netshield-advisor-",
+            dir=REPORTS_DIRECTORY,
+        ) as temp_directory:
+            temp_directory = Path(temp_directory)
+
+            temporary_text = (
+                temp_directory
+                / "security_advisor_report.txt"
+            )
+
+            temporary_json = (
+                temp_directory
+                / "security_advisor_report.json"
+            )
+
+            module_7 = subprocess.run(
+                [
+                    sys.executable,
+                    str(
+                        PROJECT_ROOT
+                        / "security_advisor"
+                        / "security_advisor.py"
+                    ),
+                    "--report-csv",
+                    str(SECURITY_REPORT_CSV),
+                    "--text-output",
+                    str(temporary_text),
+                    "--json-output",
+                    str(temporary_json),
+                ],
+                cwd=PROJECT_ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+            if module_7.returncode != 0:
+                return {
+                    "ok": False,
+                    "state": "advisor_generation_failed",
+                    "message": (
+                        module_7.stderr.strip()
+                        or module_7.stdout.strip()
+                        or "Security Advisor generation failed."
+                    ),
+                }, 500
+
+            if (
+                not temporary_text.exists()
+                or not temporary_json.exists()
+            ):
+                return {
+                    "ok": False,
+                    "state": "advisor_report_missing",
+                    "message": (
+                        "Security Advisor completed without "
+                        "producing both report files."
+                    ),
+                }, 500
+
+            try:
+                advisor_data = json.loads(
+                    temporary_json.read_text(
+                        encoding="utf-8"
+                    )
+                )
+            except (
+                OSError,
+                json.JSONDecodeError,
+            ) as exc:
+                return {
+                    "ok": False,
+                    "state": "advisor_validation_failed",
+                    "message": (
+                        "Generated advisor JSON is invalid: "
+                        + str(exc)
+                    ),
+                }, 500
+
+            required_sections = {
+                "executive_summary",
+                "overall_recommendations",
+                "networks",
+            }
+
+            if (
+                not isinstance(advisor_data, dict)
+                or not required_sections.issubset(
+                    advisor_data
+                )
+            ):
+                return {
+                    "ok": False,
+                    "state": "advisor_validation_failed",
+                    "message": (
+                        "Generated Security Advisor report "
+                        "is missing required sections."
+                    ),
+                }, 500
+
+            # Ensure the source threat report was not replaced
+            # while Module 7 was generating advice.
+            try:
+                current_report_mtime = (
+                    SECURITY_REPORT_CSV.stat().st_mtime_ns
+                )
+            except OSError as exc:
+                return {
+                    "ok": False,
+                    "state": "report_changed",
+                    "message": (
+                        "Threat report became unavailable "
+                        "during advisor generation: "
+                        + str(exc)
+                    ),
+                }, 409
+
+            if (
+                current_report_mtime
+                != source_report_mtime
+            ):
+                return {
+                    "ok": False,
+                    "state": "report_changed",
+                    "message": (
+                        "Threat Analysis changed while the "
+                        "Security Advisor was running. "
+                        "Run Security Advisor again."
+                    ),
+                }, 409
+
+            final_status = get_threat_report_status()
+
+            if final_status["status"] != "current":
+                return {
+                    "ok": False,
+                    "state": "threat_analysis_changed",
+                    "message": final_status["message"],
+                    "report_status": final_status[
+                        "status"
+                    ],
+                    "stale_sources": final_status[
+                        "stale_sources"
+                    ],
+                }, 409
+
+            # Keep backups inside the temporary directory so
+            # both real advisor files can be restored if one
+            # replacement unexpectedly fails.
+            backup_text = (
+                temp_directory
+                / "previous_advisor_report.txt"
+            )
+
+            backup_json = (
+                temp_directory
+                / "previous_advisor_report.json"
+            )
+
+            text_existed = SECURITY_ADVISOR_TEXT.exists()
+            json_existed = SECURITY_ADVISOR_JSON.exists()
+
+            if text_existed:
+                shutil.copy2(
+                    SECURITY_ADVISOR_TEXT,
+                    backup_text,
+                )
+
+            if json_existed:
+                shutil.copy2(
+                    SECURITY_ADVISOR_JSON,
+                    backup_json,
+                )
+
+            try:
+                temporary_text.replace(
+                    SECURITY_ADVISOR_TEXT
+                )
+
+                temporary_json.replace(
+                    SECURITY_ADVISOR_JSON
+                )
+
+            except OSError:
+                # Roll back so a partially updated advisor
+                # report pair is not left behind.
+                if text_existed and backup_text.exists():
+                    shutil.copy2(
+                        backup_text,
+                        SECURITY_ADVISOR_TEXT,
+                    )
+                elif not text_existed:
+                    SECURITY_ADVISOR_TEXT.unlink(
+                        missing_ok=True
+                    )
+
+                if json_existed and backup_json.exists():
+                    shutil.copy2(
+                        backup_json,
+                        SECURITY_ADVISOR_JSON,
+                    )
+                elif not json_existed:
+                    SECURITY_ADVISOR_JSON.unlink(
+                        missing_ok=True
+                    )
+
+                raise
+
+    except subprocess.TimeoutExpired:
+        return {
+            "ok": False,
+            "state": "advisor_timeout",
+            "message": "Security Advisor generation timed out.",
+        }, 500
+
+    except OSError as exc:
+        return {
+            "ok": False,
+            "state": "advisor_error",
+            "message": str(exc),
+        }, 500
+
+    summary = advisor_data[
+        "executive_summary"
+    ]
+
+    return {
+        "ok": True,
+        "state": "completed",
+        "message": (
+            "Security Advisor generated successfully."
+        ),
+        "report_status": "current",
+        "reports": [
+            SECURITY_ADVISOR_TEXT.name,
+            SECURITY_ADVISOR_JSON.name,
+        ],
+        "network_count": len(
+            advisor_data["networks"]
+        ),
+        "overall_score": summary.get(
+            "overall_security_score"
+        ),
+        "overall_grade": summary.get(
+            "overall_security_grade"
+        ),
+        "grade_label": summary.get(
+            "overall_grade_label"
+        ),
+        "recommendation_count": len(
+            advisor_data[
+                "overall_recommendations"
+            ]
+        ),
+    }, 200
+
+
+@app.post("/api/security-advisor/generate")
+def generate_security_advisor():
+    response, status_code = (
+        run_security_advisor()
+    )
+    return jsonify(response), status_code
+
+
 @app.post("/api/threats/analyze")
 def analyze_threats():
     response, status_code = run_threat_analysis()
@@ -2296,11 +2741,25 @@ def threats():
 @app.get("/api/reports")
 def reports():
     report_rows = read_reports()
+    advisor_status = get_security_advisor_status()
 
     return jsonify(
         {
             "count": len(report_rows),
             "reports": report_rows,
+            "security_advisor": {
+                "status": advisor_status["status"],
+                "generation_required": advisor_status[
+                    "generation_required"
+                ],
+                "threat_analysis_required": advisor_status[
+                    "threat_analysis_required"
+                ],
+                "message": advisor_status["message"],
+                "generate_url": (
+                    "/api/security-advisor/generate"
+                ),
+            },
         }
     )
 
