@@ -34,6 +34,9 @@ REQUIRED_COLUMNS = [
     "Deauth_Count",
     "Unknown_MAC_Count",
     "Total_Packets",
+    "Detection_Reason",
+    "Recommended_Action",
+    "Confidence",
 ]
 
 
@@ -78,7 +81,20 @@ def analyze_network(network: dict[str, str]) -> dict[str, Any]:
         "total_packets": _to_int(network.get("Total_Packets")),
         "deauth_count": _to_int(network.get("Deauth_Count")),
         "unknown_mac_count": _to_int(network.get("Unknown_MAC_Count")),
-        "explanation": _build_explanation(network, risk_level, attack_type),
+        "confidence": _to_int(network.get("Confidence")),
+        "detection_reason": _clean_text(
+            network.get("Detection_Reason"),
+            "",
+        ),
+        "source_recommended_action": _clean_text(
+            network.get("Recommended_Action"),
+            "",
+        ),
+        "explanation": _build_explanation(
+            network,
+            risk_level,
+            attack_type,
+        ),
         "recommendations": generate_recommendations(network),
     }
     return analysis
@@ -94,6 +110,13 @@ def generate_recommendations(network: dict[str, str]) -> list[str]:
     deauth_count = _to_int(network.get("Deauth_Count"))
     unknown_mac_count = _to_int(network.get("Unknown_MAC_Count"))
     score = _to_int(network.get("Suspicious_Score"), default=100)
+    source_action = _clean_text(
+        network.get("Recommended_Action"),
+        "",
+    )
+
+    if source_action:
+        recommendations.append(source_action)
 
     if encryption == "OPEN":
         recommendations.append("Use WPA2 or WPA3 instead of an open network.")
@@ -108,7 +131,22 @@ def generate_recommendations(network: dict[str, str]) -> list[str]:
         recommendations.append("Verify ownership before trusting this access point.")
         recommendations.append("Remove or isolate unauthorized access points from the environment.")
     if attack_type == "SUSPICIOUS":
-        recommendations.append("Continue monitoring this network for packet anomalies.")
+        recommendations.append(
+            "Continue monitoring this network for packet anomalies."
+        )
+    if attack_type == "WEAK_ENCRYPTION":
+        recommendations.append(
+            "Treat weak WiFi encryption as a security exposure even "
+            "when no active attack is currently observed."
+        )
+    if attack_type == "UNKNOWN_NETWORK":
+        recommendations.append(
+            "Verify whether this access point is authorized before trusting it."
+        )
+        recommendations.append(
+            "Add it to the trusted baseline only after confirming "
+            "that it is legitimate."
+        )
     if deauth_count > 0:
         recommendations.append("Investigate possible wireless deauthentication activity.")
     if unknown_mac_count > 0:
@@ -121,8 +159,10 @@ def generate_recommendations(network: dict[str, str]) -> list[str]:
     return _deduplicate(recommendations)
 
 
-def calculate_grade(analyses: list[dict[str, Any]]) -> dict[str, Any]:
-    """Calculate overall score and grade from all analyzed networks."""
+def calculate_grade(
+    analyses: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Calculate an overall grade without penalizing network count."""
 
     if not analyses:
         return {
@@ -131,30 +171,69 @@ def calculate_grade(analyses: list[dict[str, Any]]) -> dict[str, Any]:
             "grade_label": "Excellent",
         }
 
-    average_score = sum(item["security_score"] for item in analyses) / len(analyses)
-    penalty = 0
+    average_score = (
+        sum(
+            item["security_score"]
+            for item in analyses
+        )
+        / len(analyses)
+    )
+
+    total_penalty = 0.0
+
+    attack_penalties = {
+        "EVIL_TWIN": 20,
+        "ROGUE_AP": 15,
+        "SUSPICIOUS": 8,
+        "WEAK_ENCRYPTION": 6,
+        "UNKNOWN_NETWORK": 3,
+    }
+
+    risk_penalties = {
+        "DANGER": 15,
+        "WARNING": 8,
+    }
 
     for item in analyses:
-        if item["attack_type"] == "EVIL_TWIN":
-            penalty += 20
-        elif item["attack_type"] == "ROGUE_AP":
-            penalty += 15
-        elif item["attack_type"] == "SUSPICIOUS":
-            penalty += 8
+        total_penalty += attack_penalties.get(
+            item["attack_type"],
+            0,
+        )
 
-        if item["risk_level"] == "DANGER":
-            penalty += 15
-        elif item["risk_level"] == "WARNING":
-            penalty += 8
+        total_penalty += risk_penalties.get(
+            item["risk_level"],
+            0,
+        )
 
-    overall_score = max(0, min(100, round(average_score - penalty)))
-    grade, label = _grade_from_score(overall_score)
+    # Average the penalties across analyzed networks.
+    # This preserves severity weighting while preventing
+    # the score from becoming worse simply because more
+    # nearby networks were detected.
+    average_penalty = (
+        total_penalty
+        / len(analyses)
+    )
+
+    overall_score = max(
+        0,
+        min(
+            100,
+            round(
+                average_score
+                - average_penalty
+            ),
+        ),
+    )
+
+    grade, label = _grade_from_score(
+        overall_score
+    )
+
     return {
         "overall_score": overall_score,
         "overall_grade": grade,
         "grade_label": label,
     }
-
 
 def save_text_report(report: dict[str, Any], output_path: str | Path = DEFAULT_TEXT_REPORT) -> None:
     """Save the professional human-readable advisor report."""
@@ -206,6 +285,14 @@ def generate_advisor_report(
 
 
 def _build_explanation(network: dict[str, str], risk_level: str, attack_type: str) -> str:
+    detection_reason = _clean_text(
+        network.get("Detection_Reason"),
+        "",
+    )
+
+    if detection_reason:
+        return detection_reason
+
     if attack_type == "ROGUE_AP":
         return (
             "This device was not matched with known scanned access points. It may be an unauthorized device. "
@@ -218,7 +305,20 @@ def _build_explanation(network: dict[str, str], risk_level: str, attack_type: st
             "Verify using channel, signal strength and trusted BSSID."
         )
     if attack_type == "SUSPICIOUS":
-        return "This network generated unusual traffic patterns. Additional monitoring is recommended."
+        return (
+            "This network generated unusual traffic patterns. "
+            "Additional monitoring is recommended."
+        )
+    if attack_type == "WEAK_ENCRYPTION":
+        return (
+            "This network uses open or weak WiFi encryption and "
+            "should not be treated as secure for sensitive activity."
+        )
+    if attack_type == "UNKNOWN_NETWORK":
+        return (
+            "This access point is not present in the trusted baseline. "
+            "It is unverified, not a confirmed Rogue AP."
+        )
     if risk_level == "LOW RISK":
         return "This network has minor anomalies but no confirmed attack."
     if risk_level in {"WARNING", "DANGER"}:
@@ -236,6 +336,16 @@ def _build_executive_summary(analyses: list[dict[str, Any]], grade_info: dict[st
         "possible_rogue_ap": sum(1 for item in analyses if item["attack_type"] == "ROGUE_AP"),
         "possible_evil_twin": sum(1 for item in analyses if item["attack_type"] == "EVIL_TWIN"),
         "suspicious": sum(1 for item in analyses if item["attack_type"] == "SUSPICIOUS"),
+        "weak_encryption": sum(
+            1
+            for item in analyses
+            if item["attack_type"] == "WEAK_ENCRYPTION"
+        ),
+        "unknown_network": sum(
+            1
+            for item in analyses
+            if item["attack_type"] == "UNKNOWN_NETWORK"
+        ),
         "overall_security_grade": grade_info["overall_grade"],
         "overall_grade_label": grade_info["grade_label"],
         "overall_security_score": grade_info["overall_score"],
@@ -255,7 +365,24 @@ def _build_overall_recommendations(analyses: list[dict[str, Any]]) -> list[str]:
     if any(item["attack_type"] == "ROGUE_AP" for item in analyses):
         recommendations.append("Remove or investigate unauthorized access points.")
     if any(item["attack_type"] == "SUSPICIOUS" for item in analyses):
-        recommendations.append("Monitor packet anomalies over a longer capture window.")
+        recommendations.append(
+            "Monitor packet anomalies over a longer capture window."
+        )
+    if any(
+        item["attack_type"] == "WEAK_ENCRYPTION"
+        for item in analyses
+    ):
+        recommendations.append(
+            "Avoid sensitive activity on Open or WEP networks "
+            "and prefer WPA2 or WPA3."
+        )
+    if any(
+        item["attack_type"] == "UNKNOWN_NETWORK"
+        for item in analyses
+    ):
+        recommendations.append(
+            "Review unverified access points against the trusted baseline."
+        )
     if any(item["deauth_count"] > 0 for item in analyses):
         recommendations.append("Investigate deauthentication activity and consider wireless intrusion monitoring.")
 
@@ -284,6 +411,8 @@ def _build_text_report(report: dict[str, Any]) -> str:
         f"Possible Rogue AP   : {summary['possible_rogue_ap']}",
         f"Possible Evil Twin  : {summary['possible_evil_twin']}",
         f"Suspicious          : {summary['suspicious']}",
+        f"Weak Encryption     : {summary['weak_encryption']}",
+        f"Unknown Networks    : {summary['unknown_network']}",
         "",
         "Recommendations:",
     ]
@@ -305,6 +434,7 @@ def _build_text_report(report: dict[str, Any]) -> str:
                     f"   Risk Level     : {network['risk_level']}",
                     f"   Attack Type    : {network['attack_type']}",
                     f"   Security Score : {network['security_score']}/100",
+                    f"   Confidence     : {network['confidence']}%",
                     f"   Explanation    : {network['explanation']}",
                     "   Recommendations:",
                 ]
@@ -334,12 +464,22 @@ def _default_for_column(column: str) -> str:
         "Deauth_Count": "0",
         "Unknown_MAC_Count": "0",
         "Total_Packets": "0",
+        "Detection_Reason": "",
+        "Recommended_Action": "",
+        "Confidence": "0",
     }.get(column, "Unknown")
 
 
 def _normalize_attack_type(value: str | None) -> str:
     cleaned = _clean_text(value, "NORMAL").upper().replace("-", "_").replace(" ", "_")
-    if cleaned in {"NORMAL", "ROGUE_AP", "EVIL_TWIN", "SUSPICIOUS"}:
+    if cleaned in {
+        "NORMAL",
+        "ROGUE_AP",
+        "EVIL_TWIN",
+        "SUSPICIOUS",
+        "WEAK_ENCRYPTION",
+        "UNKNOWN_NETWORK",
+    }:
         return cleaned
     return "NORMAL"
 
