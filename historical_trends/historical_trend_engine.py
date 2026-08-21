@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import sqlite3
 from collections import Counter
@@ -441,6 +442,80 @@ def print_summary(report: dict[str, Any]) -> None:
     print(_build_text_report(report))
 
 
+def calculate_source_fingerprint(
+    report_csv: str | Path,
+) -> str | None:
+    """Return SHA-256 for the exact threat report being recorded."""
+
+    path = Path(report_csv)
+
+    if not path.exists() or not path.is_file():
+        return None
+
+    digest = hashlib.sha256()
+
+    try:
+        with path.open("rb") as report_file:
+            for chunk in iter(
+                lambda: report_file.read(1024 * 1024),
+                b"",
+            ):
+                digest.update(chunk)
+    except OSError:
+        return None
+
+    return digest.hexdigest()
+
+
+def get_last_source_fingerprint(
+    connection: sqlite3.Connection,
+) -> str | None:
+    """Return the fingerprint of the last recorded threat report."""
+
+    row = connection.execute(
+        """
+        SELECT value
+        FROM history_metadata
+        WHERE key = 'last_source_sha256'
+        """
+    ).fetchone()
+
+    if not row:
+        return None
+
+    value = str(row[0]).strip()
+
+    return value or None
+
+
+def set_last_source_fingerprint(
+    connection: sqlite3.Connection,
+    fingerprint: str,
+) -> None:
+    """Remember which exact threat report produced the latest snapshot."""
+
+    connection.execute(
+        """
+        INSERT INTO history_metadata (
+            key,
+            value
+        )
+        VALUES (
+            'last_source_sha256',
+            ?
+        )
+        ON CONFLICT(key)
+        DO UPDATE SET
+            value = excluded.value
+        """,
+        (
+            fingerprint,
+        ),
+    )
+
+    connection.commit()
+
+
 def run_historical_trend_engine(
     report_csv: str | Path = DEFAULT_REPORT_CSV,
     database_path: str | Path = DEFAULT_DATABASE,
@@ -448,6 +523,7 @@ def run_historical_trend_engine(
     json_output: str | Path = DEFAULT_JSON_REPORT,
 ) -> dict[str, Any]:
     connection = initialize_database(database_path)
+
     try:
         history_version = get_history_version(
             connection
@@ -476,24 +552,139 @@ def run_historical_trend_engine(
                 ),
             }
 
-        current_rows = load_current_report(report_csv)
-        if not current_rows:
-            print("[WARNING] No valid security report found. History database was not updated.")
-            return {}
+        source_fingerprint = (
+            calculate_source_fingerprint(
+                report_csv
+            )
+        )
 
-        current_scan = store_scan(connection, current_rows)
-        comparison = compare_history(connection, current_scan)
-        statistics = generate_statistics(connection)
-        report = generate_summary(current_scan, comparison, statistics)
-        save_text_report(report, text_output)
-        save_json_report(report, json_output)
+        if source_fingerprint is None:
+            print(
+                "[WARNING] Threat report could not be fingerprinted. "
+                "History database was not updated."
+            )
+
+            return {
+                "ok": False,
+                "state": "source_report_unavailable",
+                "message": (
+                    "Threat report could not be read for "
+                    "historical analysis."
+                ),
+            }
+
+        previous_fingerprint = (
+            get_last_source_fingerprint(
+                connection
+            )
+        )
+
+        if (
+            previous_fingerprint
+            == source_fingerprint
+        ):
+            print(
+                "[INFO] This exact Threat Analysis is "
+                "already stored in history."
+            )
+
+            return {
+                "ok": True,
+                "state": "already_recorded",
+                "source_report_sha256":
+                    source_fingerprint,
+                "message": (
+                    "This exact Threat Analysis is already "
+                    "recorded. No duplicate historical "
+                    "snapshot was created."
+                ),
+            }
+
+        current_rows = load_current_report(
+            report_csv
+        )
+
+        if not current_rows:
+            print(
+                "[WARNING] No valid security report found. "
+                "History database was not updated."
+            )
+
+            return {
+                "ok": False,
+                "state": "source_report_invalid",
+                "message": (
+                    "No valid threat-report rows were "
+                    "available for historical analysis."
+                ),
+            }
+
+        current_scan = store_scan(
+            connection,
+            current_rows,
+        )
+
+        comparison = compare_history(
+            connection,
+            current_scan,
+        )
+
+        statistics = generate_statistics(
+            connection
+        )
+
+        report = generate_summary(
+            current_scan,
+            comparison,
+            statistics,
+        )
+
+        report["ok"] = True
+        report["state"] = "completed"
+        report["history_version"] = (
+            CURRENT_HISTORY_VERSION
+        )
+        report["source_report_sha256"] = (
+            source_fingerprint
+        )
+
+        save_text_report(
+            report,
+            text_output,
+        )
+
+        save_json_report(
+            report,
+            json_output,
+        )
+
+        set_last_source_fingerprint(
+            connection,
+            source_fingerprint,
+        )
+
         print_summary(report)
-        print(f"\n[OK] History database updated: {Path(database_path)}")
-        print(f"[OK] Text report saved to: {Path(text_output)}")
-        print(f"[OK] JSON report saved to: {Path(json_output)}")
+
+        print(
+            f"\n[OK] History database updated: "
+            f"{Path(database_path)}"
+        )
+
+        print(
+            f"[OK] Text report saved to: "
+            f"{Path(text_output)}"
+        )
+
+        print(
+            f"[OK] JSON report saved to: "
+            f"{Path(json_output)}"
+        )
+
         return report
+
     finally:
         connection.close()
+
 
 
 def _calculate_scan_summary(rows: list[dict[str, str]]) -> dict[str, Any]:
