@@ -48,6 +48,18 @@ SECURITY_ADVISOR_JSON = (
     / "security_advisor_report.json"
 )
 HISTORY_DB = PROJECT_ROOT / "security_reports" / "history.db"
+HISTORICAL_TREND_TEXT = (
+    REPORTS_DIRECTORY
+    / "historical_trend_report.txt"
+)
+HISTORICAL_TREND_JSON = (
+    REPORTS_DIRECTORY
+    / "historical_trend_report.json"
+)
+LEGACY_HISTORY_DIRECTORY = (
+    REPORTS_DIRECTORY
+    / "legacy_history"
+)
 ALLOWED_REPORT_EXTENSIONS = {".csv", ".json", ".txt", ".log"}
 
 SYSTEMCTL_PATH = "/usr/bin/systemctl"
@@ -1087,8 +1099,260 @@ def _get_safe_report(filename: str) -> Path | None:
     return report_path
 
 
+def get_history_storage_status() -> dict:
+    """Inspect history compatibility without modifying the database."""
+
+    current_version = "baseline-aware-v2"
+
+    if not HISTORY_DB.exists():
+        return {
+            "status": "missing",
+            "analysis_version": None,
+            "current_version": current_version,
+            "migration_required": False,
+            "message": (
+                "No current historical database exists yet. "
+                "Generate Historical Trends after completing "
+                "current Threat Analysis."
+            ),
+        }
+
+    try:
+        with sqlite3.connect(HISTORY_DB) as connection:
+            tables = {
+                row[0]
+                for row in connection.execute(
+                    """
+                    SELECT name
+                    FROM sqlite_master
+                    WHERE type = 'table'
+                    """
+                ).fetchall()
+            }
+
+            if "scan_history" not in tables:
+                return {
+                    "status": "unavailable",
+                    "analysis_version": None,
+                    "current_version": current_version,
+                    "migration_required": True,
+                    "message": (
+                        "History database does not contain the "
+                        "expected scan_history table."
+                    ),
+                }
+
+            history_count = connection.execute(
+                "SELECT COUNT(*) FROM scan_history"
+            ).fetchone()[0]
+
+            if "history_metadata" not in tables:
+                if history_count > 0:
+                    return {
+                        "status": "legacy",
+                        "analysis_version":
+                            "legacy-pre-baseline",
+                        "current_version": current_version,
+                        "migration_required": True,
+                        "message": (
+                            "Saved history was created by the older "
+                            "threat-detection logic and is not mixed "
+                            "with current baseline-aware history."
+                        ),
+                    }
+
+                return {
+                    "status": "empty",
+                    "analysis_version": None,
+                    "current_version": current_version,
+                    "migration_required": False,
+                    "message": (
+                        "History database is empty and has not yet "
+                        "stored a baseline-aware analysis."
+                    ),
+                }
+
+            version_row = connection.execute(
+                """
+                SELECT value
+                FROM history_metadata
+                WHERE key = 'analysis_version'
+                """
+            ).fetchone()
+
+            stored_version = (
+                str(version_row[0]).strip()
+                if version_row
+                else None
+            )
+
+            if stored_version != current_version:
+                return {
+                    "status": "legacy",
+                    "analysis_version": (
+                        stored_version
+                        or "legacy-pre-baseline"
+                    ),
+                    "current_version": current_version,
+                    "migration_required": True,
+                    "message": (
+                        "Saved history uses an older analysis "
+                        "version and is not shown as current "
+                        "NetShield history."
+                    ),
+                }
+
+            return {
+                "status": "current",
+                "analysis_version": stored_version,
+                "current_version": current_version,
+                "migration_required": False,
+                "message": (
+                    "Historical data uses the current "
+                    "baseline-aware analysis version."
+                ),
+            }
+
+    except sqlite3.Error as database_error:
+        return {
+            "status": "unavailable",
+            "analysis_version": None,
+            "current_version": current_version,
+            "migration_required": True,
+            "message": (
+                "History database could not be inspected: "
+                + str(database_error)
+            ),
+        }
+
+
+def archive_legacy_history() -> tuple[dict, int]:
+    """Archive legacy history without deleting historical evidence."""
+
+    storage_status = get_history_storage_status()
+
+    if storage_status["status"] != "legacy":
+        return {
+            "ok": False,
+            "state": "archive_not_required",
+            "message": (
+                "Legacy history archive is not required for "
+                f"history status {storage_status['status']}."
+            ),
+            "history_status": storage_status["status"],
+        }, 409
+
+    source_files = [
+        HISTORY_DB,
+        HISTORICAL_TREND_TEXT,
+        HISTORICAL_TREND_JSON,
+    ]
+
+    existing_files = [
+        source
+        for source in source_files
+        if source.exists()
+    ]
+
+    if not existing_files:
+        return {
+            "ok": False,
+            "state": "legacy_files_missing",
+            "message": (
+                "Legacy history was detected but no archiveable "
+                "history files were found."
+            ),
+        }, 409
+
+    archive_stamp = datetime.now(
+        timezone.utc
+    ).strftime(
+        "%Y%m%dT%H%M%S%fZ"
+    )
+
+    archive_directory = (
+        LEGACY_HISTORY_DIRECTORY
+        / archive_stamp
+    )
+
+    moved_files: list[tuple[Path, Path]] = []
+
+    try:
+        archive_directory.mkdir(
+            parents=True,
+            exist_ok=False,
+        )
+
+        for source in existing_files:
+            destination = (
+                archive_directory
+                / source.name
+            )
+
+            source.replace(destination)
+
+            moved_files.append(
+                (
+                    source,
+                    destination,
+                )
+            )
+
+    except OSError as exc:
+        # Restore anything already moved so an incomplete
+        # archive operation does not lose the active files.
+        for source, destination in reversed(
+            moved_files
+        ):
+            if destination.exists():
+                destination.replace(source)
+
+        try:
+            archive_directory.rmdir()
+        except OSError:
+            pass
+
+        return {
+            "ok": False,
+            "state": "archive_failed",
+            "message": (
+                "Legacy history could not be archived: "
+                + str(exc)
+            ),
+        }, 500
+
+    try:
+        archive_display_path = str(
+            archive_directory.relative_to(
+                PROJECT_ROOT
+            )
+        )
+    except ValueError:
+        archive_display_path = str(
+            archive_directory
+        )
+
+    return {
+        "ok": True,
+        "state": "archived",
+        "message": (
+            "Legacy history was archived successfully. "
+            "NetShield can now begin a clean baseline-aware "
+            "history timeline."
+        ),
+        "archive_directory": archive_display_path,
+        "archived_files": [
+            destination.name
+            for _, destination in moved_files
+        ],
+    }, 200
+
+
 def read_history() -> dict:
-    """Read saved scan summaries and findings from the history database."""
+    """Read only current-version historical analysis data."""
+
+    storage_status = get_history_storage_status()
+
     empty_result = {
         "scan_count": 0,
         "latest": None,
@@ -1100,9 +1364,25 @@ def read_history() -> dict:
             "score_change": None,
             "finding_change": None,
         },
+        "history_status": storage_status["status"],
+        "analysis_version": storage_status[
+            "analysis_version"
+        ],
+        "current_version": storage_status[
+            "current_version"
+        ],
+        "migration_required": storage_status[
+            "migration_required"
+        ],
+        "message": storage_status["message"],
+        "archive_legacy_url": (
+            "/api/history/archive-legacy"
+            if storage_status["status"] == "legacy"
+            else None
+        ),
     }
 
-    if not HISTORY_DB.exists():
+    if storage_status["status"] != "current":
         return empty_result
 
     try:
@@ -1120,6 +1400,9 @@ def read_history() -> dict:
                     danger_count,
                     rogue_count,
                     evil_twin_count,
+                    suspicious_count,
+                    weak_encryption_count,
+                    unknown_network_count,
                     average_security_score
                 FROM scan_summary
                 ORDER BY scan_timestamp DESC
@@ -1139,29 +1422,72 @@ def read_history() -> dict:
                     risk_level,
                     attack_type
                 FROM scan_history
-                WHERE UPPER(COALESCE(attack_type, 'NORMAL')) <> 'NORMAL'
-                ORDER BY scan_timestamp DESC, scan_id DESC
+                WHERE UPPER(
+                    COALESCE(
+                        attack_type,
+                        'NORMAL'
+                    )
+                ) <> 'NORMAL'
+                ORDER BY
+                    scan_timestamp DESC,
+                    scan_id DESC
                 LIMIT 12
                 """
             ).fetchall()
+
     except sqlite3.Error as database_error:
-        print(f"[WARNING] Unable to read history database: {database_error}")
-        return empty_result
+        result = dict(empty_result)
+
+        result.update(
+            {
+                "history_status": "unavailable",
+                "migration_required": True,
+                "message": (
+                    "Unable to read current history database: "
+                    + str(database_error)
+                ),
+            }
+        )
+
+        return result
 
     summaries = []
 
     for row in summary_rows:
         summary = dict(row)
-        summary["potential_findings"] = (
-            int(summary.get("rogue_count") or 0)
-            + int(summary.get("evil_twin_count") or 0)
+
+        summary["potential_findings"] = sum(
+            int(
+                summary.get(column)
+                or 0
+            )
+            for column in (
+                "rogue_count",
+                "evil_twin_count",
+                "suspicious_count",
+                "weak_encryption_count",
+                "unknown_network_count",
+            )
         )
+
         summaries.append(summary)
 
-    findings = [dict(row) for row in finding_rows]
+    findings = [
+        dict(row)
+        for row in finding_rows
+    ]
 
-    latest = summaries[0] if summaries else None
-    previous = summaries[1] if len(summaries) > 1 else None
+    latest = (
+        summaries[0]
+        if summaries
+        else None
+    )
+
+    previous = (
+        summaries[1]
+        if len(summaries) > 1
+        else None
+    )
 
     trends = {
         "network_change": None,
@@ -1172,17 +1498,47 @@ def read_history() -> dict:
     if latest and previous:
         trends = {
             "network_change": (
-                int(latest["total_networks"] or 0)
-                - int(previous["total_networks"] or 0)
+                int(
+                    latest[
+                        "total_networks"
+                    ]
+                    or 0
+                )
+                - int(
+                    previous[
+                        "total_networks"
+                    ]
+                    or 0
+                )
             ),
             "score_change": round(
-                float(latest["average_security_score"] or 0)
-                - float(previous["average_security_score"] or 0),
+                float(
+                    latest[
+                        "average_security_score"
+                    ]
+                    or 0
+                )
+                - float(
+                    previous[
+                        "average_security_score"
+                    ]
+                    or 0
+                ),
                 1,
             ),
             "finding_change": (
-                int(latest["potential_findings"] or 0)
-                - int(previous["potential_findings"] or 0)
+                int(
+                    latest[
+                        "potential_findings"
+                    ]
+                    or 0
+                )
+                - int(
+                    previous[
+                        "potential_findings"
+                    ]
+                    or 0
+                )
             ),
         }
 
@@ -1193,8 +1549,17 @@ def read_history() -> dict:
         "summaries": summaries,
         "recent_findings": findings,
         "trends": trends,
+        "history_status": "current",
+        "analysis_version": storage_status[
+            "analysis_version"
+        ],
+        "current_version": storage_status[
+            "current_version"
+        ],
+        "migration_required": False,
+        "message": storage_status["message"],
+        "archive_legacy_url": None,
     }
-
 
 def _read_interface_capabilities(interface: str) -> dict:
     """Read supported WiFi bands and enabled channels for an interface."""
@@ -2816,6 +3181,14 @@ def download_report(filename):
 @app.get("/api/history")
 def history():
     return jsonify(read_history())
+
+
+@app.post("/api/history/archive-legacy")
+def archive_legacy_history_route():
+    response, status_code = (
+        archive_legacy_history()
+    )
+    return jsonify(response), status_code
 
 
 @app.get("/api/adapter/status")

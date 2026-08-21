@@ -28,6 +28,9 @@ DEFAULT_DATABASE = Path("security_reports/history.db")
 DEFAULT_TEXT_REPORT = Path("security_reports/historical_trend_report.txt")
 DEFAULT_JSON_REPORT = Path("security_reports/historical_trend_report.json")
 
+CURRENT_HISTORY_VERSION = "baseline-aware-v2"
+LEGACY_HISTORY_VERSION = "legacy-pre-baseline"
+
 REQUIRED_COLUMNS = [
     "SSID",
     "BSSID",
@@ -64,6 +67,15 @@ def initialize_database(database_path: str | Path = DEFAULT_DATABASE) -> sqlite3
     )
     cursor.execute(
         """
+        CREATE TABLE IF NOT EXISTS history_metadata (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+        """
+    )
+
+    cursor.execute(
+        """
         CREATE TABLE IF NOT EXISTS scan_summary (
             scan_timestamp TEXT NOT NULL,
             total_networks INTEGER,
@@ -73,12 +85,92 @@ def initialize_database(database_path: str | Path = DEFAULT_DATABASE) -> sqlite3
             danger_count INTEGER,
             rogue_count INTEGER,
             evil_twin_count INTEGER,
+            suspicious_count INTEGER DEFAULT 0,
+            weak_encryption_count INTEGER DEFAULT 0,
+            unknown_network_count INTEGER DEFAULT 0,
             average_security_score REAL
         )
         """
     )
+    existing_summary_columns = {
+        row[1]
+        for row in cursor.execute(
+            "PRAGMA table_info(scan_summary)"
+        ).fetchall()
+    }
+
+    stored_version_row = cursor.execute(
+        """
+        SELECT value
+        FROM history_metadata
+        WHERE key = 'analysis_version'
+        """
+    ).fetchone()
+
+    if stored_version_row is None:
+        existing_history_count = cursor.execute(
+            "SELECT COUNT(*) FROM scan_history"
+        ).fetchone()[0]
+
+        detected_version = (
+            LEGACY_HISTORY_VERSION
+            if existing_history_count > 0
+            else CURRENT_HISTORY_VERSION
+        )
+
+        cursor.execute(
+            """
+            INSERT INTO history_metadata (
+                key,
+                value
+            )
+            VALUES (
+                'analysis_version',
+                ?
+            )
+            """,
+            (
+                detected_version,
+            ),
+        )
+
+    required_summary_columns = {
+        "suspicious_count":
+            "INTEGER DEFAULT 0",
+        "weak_encryption_count":
+            "INTEGER DEFAULT 0",
+        "unknown_network_count":
+            "INTEGER DEFAULT 0",
+    }
+
+    for column, definition in required_summary_columns.items():
+        if column not in existing_summary_columns:
+            cursor.execute(
+                f"ALTER TABLE scan_summary "
+                f"ADD COLUMN {column} {definition}"
+            )
+
     connection.commit()
     return connection
+
+
+def get_history_version(
+    connection: sqlite3.Connection,
+) -> str:
+    """Return the analysis version associated with stored history."""
+
+    row = connection.execute(
+        """
+        SELECT value
+        FROM history_metadata
+        WHERE key = 'analysis_version'
+        """
+    ).fetchone()
+
+    if not row:
+        return "unknown"
+
+    return str(row[0]).strip() or "unknown"
 
 
 def load_current_report(report_csv: str | Path = DEFAULT_REPORT_CSV) -> list[dict[str, str]]:
@@ -140,9 +232,10 @@ def store_scan(connection: sqlite3.Connection, current_rows: list[dict[str, str]
         INSERT INTO scan_summary (
             scan_timestamp, total_networks, safe_count, low_risk_count,
             warning_count, danger_count, rogue_count, evil_twin_count,
-            average_security_score
+            suspicious_count, weak_encryption_count,
+            unknown_network_count, average_security_score
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             scan_timestamp,
@@ -153,6 +246,9 @@ def store_scan(connection: sqlite3.Connection, current_rows: list[dict[str, str]
             summary["danger_count"],
             summary["rogue_count"],
             summary["evil_twin_count"],
+            summary["suspicious_count"],
+            summary["weak_encryption_count"],
+            summary["unknown_network_count"],
             summary["average_security_score"],
         ),
     )
@@ -353,6 +449,33 @@ def run_historical_trend_engine(
 ) -> dict[str, Any]:
     connection = initialize_database(database_path)
     try:
+        history_version = get_history_version(
+            connection
+        )
+
+        if history_version != CURRENT_HISTORY_VERSION:
+            print(
+                "[WARNING] Historical database uses analysis version "
+                f"{history_version}. Current NetShield history requires "
+                f"{CURRENT_HISTORY_VERSION}."
+            )
+            print(
+                "[WARNING] New baseline-aware scans will not be mixed "
+                "with legacy threat-detection history."
+            )
+
+            return {
+                "ok": False,
+                "state": "legacy_history_detected",
+                "history_version": history_version,
+                "required_version": CURRENT_HISTORY_VERSION,
+                "message": (
+                    "Legacy historical data was detected. "
+                    "Start a current-history database before storing "
+                    "baseline-aware results."
+                ),
+            }
+
         current_rows = load_current_report(report_csv)
         if not current_rows:
             print("[WARNING] No valid security report found. History database was not updated.")
@@ -381,9 +504,39 @@ def _calculate_scan_summary(rows: list[dict[str, str]]) -> dict[str, Any]:
         "low_risk_count": sum(1 for row in rows if row["Risk_Level"] == "LOW RISK"),
         "warning_count": sum(1 for row in rows if row["Risk_Level"] == "WARNING"),
         "danger_count": sum(1 for row in rows if row["Risk_Level"] == "DANGER"),
-        "rogue_count": sum(1 for row in rows if row["Attack_Type"] == "ROGUE_AP"),
-        "evil_twin_count": sum(1 for row in rows if row["Attack_Type"] == "EVIL_TWIN"),
-        "average_security_score": round(sum(scores) / len(scores), 2) if scores else 0,
+        "rogue_count": sum(
+            1
+            for row in rows
+            if row["Attack_Type"] == "ROGUE_AP"
+        ),
+        "evil_twin_count": sum(
+            1
+            for row in rows
+            if row["Attack_Type"] == "EVIL_TWIN"
+        ),
+        "suspicious_count": sum(
+            1
+            for row in rows
+            if row["Attack_Type"] == "SUSPICIOUS"
+        ),
+        "weak_encryption_count": sum(
+            1
+            for row in rows
+            if row["Attack_Type"] == "WEAK_ENCRYPTION"
+        ),
+        "unknown_network_count": sum(
+            1
+            for row in rows
+            if row["Attack_Type"] == "UNKNOWN_NETWORK"
+        ),
+        "average_security_score": (
+            round(
+                sum(scores) / len(scores),
+                2,
+            )
+            if scores
+            else 0
+        ),
     }
 
 
@@ -444,7 +597,9 @@ def _load_summary_by_scan_id(connection: sqlite3.Connection, scan_id: int | None
     row = connection.execute(
         """
         SELECT total_networks, safe_count, low_risk_count, warning_count,
-               danger_count, rogue_count, evil_twin_count, average_security_score
+               danger_count, rogue_count, evil_twin_count,
+               suspicious_count, weak_encryption_count,
+               unknown_network_count, average_security_score
         FROM scan_summary
         WHERE scan_timestamp = ?
         """,
@@ -461,7 +616,10 @@ def _load_summary_by_scan_id(connection: sqlite3.Connection, scan_id: int | None
         "danger_count": int(row[4]),
         "rogue_count": int(row[5]),
         "evil_twin_count": int(row[6]),
-        "average_security_score": float(row[7]),
+        "suspicious_count": int(row[7] or 0),
+        "weak_encryption_count": int(row[8] or 0),
+        "unknown_network_count": int(row[9] or 0),
+        "average_security_score": float(row[10]),
     }
 
 
@@ -602,7 +760,14 @@ def _normalize_risk_level(value: str | None) -> str:
 
 def _normalize_attack_type(value: str | None) -> str:
     cleaned = _clean_text(value, "NORMAL").upper().replace("-", "_").replace(" ", "_")
-    if cleaned in {"NORMAL", "SUSPICIOUS", "ROGUE_AP", "EVIL_TWIN"}:
+    if cleaned in {
+        "NORMAL",
+        "ROGUE_AP",
+        "EVIL_TWIN",
+        "SUSPICIOUS",
+        "WEAK_ENCRYPTION",
+        "UNKNOWN_NETWORK",
+    }:
         return cleaned
     return "NORMAL"
 
