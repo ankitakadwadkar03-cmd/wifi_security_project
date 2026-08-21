@@ -439,7 +439,16 @@ export default function HistoryPage() {
 
                   <div className="historyScanDetails">
                     <span>
-                      Safe: {scan.safe_count}
+                      Normal:{" "}
+                      {Math.max(
+                        0,
+                        Number(scan.total_networks || 0) -
+                          Number(scan.potential_findings || 0)
+                      )}
+                    </span>
+
+                    <span>
+                      Risk level SAFE: {scan.safe_count}
                     </span>
 
                     <span>

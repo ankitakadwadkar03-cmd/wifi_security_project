@@ -496,7 +496,11 @@ def compare_history(
             network_trends,
         "overall_trend":
             _classify_overall_trend(
-                score_difference
+                score_difference,
+                (
+                    current_potential_findings
+                    - previous_potential_findings
+                ),
             ),
     }
 
@@ -1494,11 +1498,48 @@ def _default_for_column(column: str) -> str:
     }.get(column, "Unknown")
 
 
-def _classify_overall_trend(score_difference: float) -> str:
-    if score_difference > 0:
+def _classify_overall_trend(
+    score_difference: float,
+    finding_difference: int = 0,
+) -> str:
+    """Classify trend using score and potential-finding changes."""
+
+    if (
+        score_difference > 0
+        and finding_difference <= 0
+    ):
         return "IMPROVING"
-    if score_difference < 0:
+
+    if (
+        score_difference < 0
+        and finding_difference >= 0
+    ):
         return "DECLINING"
+
+    if (
+        score_difference == 0
+        and finding_difference < 0
+    ):
+        return "IMPROVING"
+
+    if (
+        score_difference == 0
+        and finding_difference > 0
+    ):
+        return "DECLINING"
+
+    if (
+        score_difference > 0
+        and finding_difference > 0
+    ):
+        return "MIXED"
+
+    if (
+        score_difference < 0
+        and finding_difference < 0
+    ):
+        return "MIXED"
+
     return "STABLE"
 
 
