@@ -1353,6 +1353,16 @@ def read_history() -> dict:
     """Read only current-version historical analysis data."""
 
     storage_status = get_history_storage_status()
+    threat_status = get_threat_report_status()
+
+    generation_allowed = (
+        storage_status["status"] in {
+            "missing",
+            "empty",
+            "current",
+        }
+        and threat_status["status"] == "current"
+    )
 
     empty_result = {
         "scan_count": 0,
@@ -1381,6 +1391,13 @@ def read_history() -> dict:
             if storage_status["status"] == "legacy"
             else None
         ),
+        "generate_url": "/api/history/generate",
+        "generation_allowed": generation_allowed,
+        "threat_report_status": threat_status["status"],
+        "threat_analysis_required": threat_status[
+            "analysis_required"
+        ],
+        "threat_report_message": threat_status["message"],
     }
 
     if storage_status["status"] != "current":
@@ -1560,6 +1577,13 @@ def read_history() -> dict:
         "migration_required": False,
         "message": storage_status["message"],
         "archive_legacy_url": None,
+        "generate_url": "/api/history/generate",
+        "generation_allowed": generation_allowed,
+        "threat_report_status": threat_status["status"],
+        "threat_analysis_required": threat_status[
+            "analysis_required"
+        ],
+        "threat_report_message": threat_status["message"],
     }
 
 def _read_interface_capabilities(interface: str) -> dict:

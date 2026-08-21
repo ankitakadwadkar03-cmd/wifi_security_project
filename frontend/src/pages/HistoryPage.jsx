@@ -39,6 +39,10 @@ export default function HistoryPage() {
   const [archiveMessage, setArchiveMessage] = useState("");
   const [archiveError, setArchiveError] = useState("");
 
+  const [generationLoading, setGenerationLoading] = useState(false);
+  const [generationMessage, setGenerationMessage] = useState("");
+  const [generationError, setGenerationError] = useState("");
+
   async function loadHistory(signal) {
     try {
       setLoading(true);
@@ -140,6 +144,59 @@ export default function HistoryPage() {
     }
   }
 
+  async function generateHistoricalTrends() {
+    if (
+      generationLoading ||
+      !history?.generate_url ||
+      !history?.generation_allowed
+    ) {
+      return;
+    }
+
+    try {
+      setGenerationLoading(true);
+      setGenerationMessage("");
+      setGenerationError("");
+
+      const response = await fetch(
+        `${API_BASE_URL}${history.generate_url}`,
+        {
+          method: "POST",
+        }
+      );
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          data.message ||
+            `Historical Trend generation returned HTTP ${response.status}`
+        );
+      }
+
+      setGenerationMessage(
+        data.message ||
+          "Historical Trends updated successfully."
+      );
+
+      await loadHistory();
+    } catch (generationRequestError) {
+      console.error(
+        "Historical Trend generation failed:",
+        generationRequestError
+      );
+
+      setGenerationError(
+        generationRequestError.message ||
+          "Historical Trends could not be updated."
+      );
+
+      await loadHistory();
+    } finally {
+      setGenerationLoading(false);
+    }
+  }
+
   const latest = history?.latest;
 
   const summaries = Array.isArray(
@@ -153,6 +210,9 @@ export default function HistoryPage() {
   const legacyHistory =
     history?.history_status === "legacy" &&
     history?.migration_required;
+
+  const historyGenerationBlocked =
+    !history?.generation_allowed;
 
   return (
     <section className="appPage historyPage">
@@ -225,12 +285,63 @@ export default function HistoryPage() {
       {!loading &&
         !error &&
         !legacyHistory &&
-        !latest && (
+        history && (
           <div className="networkTableMessage">
-            {history?.message ||
-              "No historical scans are currently stored."}
+            <strong>Historical Trend Storage</strong>
+
+            <br />
+            <br />
+
+            {history.threat_analysis_required
+              ? history.threat_report_message ||
+                "Run fresh Threat Analysis before updating history."
+              : latest
+                ? "The current baseline-aware timeline is ready. Save a new snapshot whenever Threat Analysis produces new results."
+                : history.message ||
+                  "No baseline-aware historical scans are stored yet."}
+
+            <br />
+            <br />
+
+            <button
+              type="button"
+              className="primaryButton"
+              onClick={generateHistoricalTrends}
+              disabled={
+                generationLoading ||
+                historyGenerationBlocked
+              }
+            >
+              {generationLoading
+                ? "Updating History..."
+                : latest
+                  ? "Update History"
+                  : "Generate History"}
+            </button>
+
+            {history.threat_analysis_required && (
+              <>
+                <br />
+                <br />
+
+                Run fresh Threat Analysis in the Threat Center before
+                generating a Historical Trend snapshot.
+              </>
+            )}
           </div>
         )}
+
+      {generationMessage && (
+        <p className="scannerActionMessage">
+          {generationMessage}
+        </p>
+      )}
+
+      {generationError && (
+        <p className="scannerActionMessage errorMessage">
+          {generationError}
+        </p>
+      )}
 
       {!loading && !error && latest && (
         <>
