@@ -59,6 +59,11 @@ TRUSTED_BASELINE_REPORT_JSON = (
 )
 CURRENT_TRUSTED_BASELINE_VERSION = "baseline-aware-v2"
 
+LEGACY_TRUSTED_BASELINE_DIRECTORY = (
+    REPORTS_DIRECTORY
+    / "legacy_trusted_baseline"
+)
+
 HISTORY_DB = PROJECT_ROOT / "security_reports" / "history.db"
 HISTORICAL_TREND_TEXT = (
     REPORTS_DIRECTORY
@@ -958,6 +963,8 @@ def get_trusted_baseline_report_status() -> dict:
             "current_version":
                 CURRENT_TRUSTED_BASELINE_VERSION,
             "migration_required": True,
+            "archive_legacy_url":
+                "/api/trusted-baseline/archive-legacy",
             "message": (
                 "Saved Trusted Baseline reports were "
                 "created before the current provenance-aware "
@@ -1042,6 +1049,489 @@ def get_trusted_baseline_report_status() -> dict:
             "WiFi scan and trusted-network baseline."
         ),
     }
+
+
+def archive_legacy_trusted_baseline() -> tuple[dict, int]:
+    """Archive legacy Trusted Baseline reports without deleting evidence."""
+
+    status = get_trusted_baseline_report_status()
+
+    if status["status"] != "legacy":
+        return {
+            "ok": False,
+            "state": "archive_not_required",
+            "message": (
+                "Legacy Trusted Baseline archive is not "
+                "required for status "
+                + str(status["status"])
+                + "."
+            ),
+            "baseline_status": status["status"],
+        }, 409
+
+    source_files = [
+        TRUSTED_BASELINE_REPORT_CSV,
+        TRUSTED_BASELINE_REPORT_JSON,
+    ]
+
+    existing_files = [
+        source
+        for source in source_files
+        if source.exists()
+    ]
+
+    if len(existing_files) != len(source_files):
+        return {
+            "ok": False,
+            "state": "legacy_files_incomplete",
+            "message": (
+                "Legacy Trusted Baseline reports are incomplete "
+                "and cannot be archived as one verified pair."
+            ),
+        }, 409
+
+    archive_stamp = datetime.now(
+        timezone.utc
+    ).strftime(
+        "%Y%m%dT%H%M%S%fZ"
+    )
+
+    archive_directory = (
+        LEGACY_TRUSTED_BASELINE_DIRECTORY
+        / archive_stamp
+    )
+
+    moved_files: list[tuple[Path, Path]] = []
+
+    try:
+        archive_directory.mkdir(
+            parents=True,
+            exist_ok=False,
+        )
+
+        for source in existing_files:
+            destination = (
+                archive_directory
+                / source.name
+            )
+
+            source.replace(destination)
+
+            moved_files.append(
+                (
+                    source,
+                    destination,
+                )
+            )
+
+    except OSError as exc:
+        for source, destination in reversed(
+            moved_files
+        ):
+            if destination.exists():
+                try:
+                    destination.replace(source)
+                except OSError:
+                    pass
+
+        try:
+            archive_directory.rmdir()
+        except OSError:
+            pass
+
+        return {
+            "ok": False,
+            "state": "archive_failed",
+            "message": (
+                "Legacy Trusted Baseline reports could "
+                "not be archived: "
+                + str(exc)
+            ),
+        }, 500
+
+    try:
+        archive_display = str(
+            archive_directory.relative_to(
+                PROJECT_ROOT
+            )
+        )
+    except ValueError:
+        archive_display = str(
+            archive_directory
+        )
+
+    return {
+        "ok": True,
+        "state": "archived",
+        "message": (
+            "Legacy Trusted Baseline reports were "
+            "archived successfully."
+        ),
+        "archive_directory": archive_display,
+        "archived_files": [
+            destination.name
+            for _, destination in moved_files
+        ],
+        "after_status":
+            get_trusted_baseline_report_status()[
+                "status"
+            ],
+    }, 200
+
+
+def run_trusted_baseline_generation() -> tuple[dict, int]:
+    """Safely generate Trusted Baseline reports from current sources."""
+
+    status = get_trusted_baseline_report_status()
+
+    if status["status"] == "legacy":
+        return {
+            "ok": False,
+            "state": "legacy_baseline_detected",
+            "message": (
+                "Legacy Trusted Baseline reports must be "
+                "archived before generating the current "
+                "provenance-aware reports."
+            ),
+            "baseline_status": "legacy",
+            "migration_required": True,
+            "archive_legacy_url":
+                "/api/trusted-baseline/archive-legacy",
+        }, 409
+
+    if status["status"] in {
+        "incomplete",
+        "unavailable",
+    }:
+        return {
+            "ok": False,
+            "state": "baseline_outputs_unavailable",
+            "message": status["message"],
+            "baseline_status": status["status"],
+        }, 409
+
+    scan_fingerprint = _calculate_file_sha256(
+        NETWORK_CSV
+    )
+
+    trusted_fingerprint = _calculate_file_sha256(
+        TRUSTED_NETWORKS_CSV
+    )
+
+    if (
+        scan_fingerprint is None
+        or trusted_fingerprint is None
+    ):
+        return {
+            "ok": False,
+            "state": "source_unavailable",
+            "message": (
+                "Current WiFi scan or trusted-network "
+                "baseline is missing or unreadable."
+            ),
+        }, 409
+
+    if status["status"] == "current":
+        return {
+            "ok": True,
+            "state": "already_current",
+            "message": (
+                "Trusted Baseline reports already match "
+                "the current WiFi scan and trusted baseline."
+            ),
+            "baseline_status": "current",
+        }, 200
+
+    try:
+        scan_mtime = NETWORK_CSV.stat().st_mtime_ns
+        trusted_mtime = (
+            TRUSTED_NETWORKS_CSV.stat().st_mtime_ns
+        )
+    except OSError as exc:
+        return {
+            "ok": False,
+            "state": "source_unavailable",
+            "message": str(exc),
+        }, 500
+
+    REPORTS_DIRECTORY.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix="netshield-baseline-",
+            dir=REPORTS_DIRECTORY,
+        ) as temp_directory:
+            temp_directory = Path(
+                temp_directory
+            )
+
+            temporary_csv = (
+                temp_directory
+                / TRUSTED_BASELINE_REPORT_CSV.name
+            )
+
+            temporary_json = (
+                temp_directory
+                / TRUSTED_BASELINE_REPORT_JSON.name
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(
+                        PROJECT_ROOT
+                        / "trusted_baseline"
+                        / "trusted_baseline_checker.py"
+                    ),
+                    "--scan-csv",
+                    str(NETWORK_CSV),
+                    "--trusted-csv",
+                    str(TRUSTED_NETWORKS_CSV),
+                    "--output-csv",
+                    str(temporary_csv),
+                    "--output-json",
+                    str(temporary_json),
+                ],
+                cwd=PROJECT_ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+            if result.returncode != 0:
+                return {
+                    "ok": False,
+                    "state": "baseline_generation_failed",
+                    "message": (
+                        result.stderr.strip()
+                        or result.stdout.strip()
+                        or (
+                            "Trusted Baseline generation "
+                            "failed."
+                        )
+                    ),
+                }, 500
+
+            if (
+                not temporary_csv.exists()
+                or not temporary_json.exists()
+            ):
+                return {
+                    "ok": False,
+                    "state": "baseline_output_missing",
+                    "message": (
+                        "Trusted Baseline generation did not "
+                        "produce both report files."
+                    ),
+                }, 500
+
+            try:
+                payload = json.loads(
+                    temporary_json.read_text(
+                        encoding="utf-8"
+                    )
+                )
+            except (
+                OSError,
+                json.JSONDecodeError,
+            ) as exc:
+                return {
+                    "ok": False,
+                    "state": "baseline_validation_failed",
+                    "message": (
+                        "Generated Trusted Baseline JSON "
+                        "is invalid: "
+                        + str(exc)
+                    ),
+                }, 500
+
+            if (
+                payload.get("analysis_version")
+                    != CURRENT_TRUSTED_BASELINE_VERSION
+                or payload.get(
+                    "source_scan_sha256"
+                ) != scan_fingerprint
+                or payload.get(
+                    "source_trusted_baseline_sha256"
+                ) != trusted_fingerprint
+                or not isinstance(
+                    payload.get("summary"),
+                    dict,
+                )
+                or not isinstance(
+                    payload.get("findings"),
+                    list,
+                )
+            ):
+                return {
+                    "ok": False,
+                    "state": "baseline_validation_failed",
+                    "message": (
+                        "Generated Trusted Baseline reports "
+                        "failed version, fingerprint, or "
+                        "structure validation."
+                    ),
+                }, 500
+
+            current_scan_fingerprint = (
+                _calculate_file_sha256(
+                    NETWORK_CSV
+                )
+            )
+
+            current_trusted_fingerprint = (
+                _calculate_file_sha256(
+                    TRUSTED_NETWORKS_CSV
+                )
+            )
+
+            try:
+                current_scan_mtime = (
+                    NETWORK_CSV.stat().st_mtime_ns
+                )
+                current_trusted_mtime = (
+                    TRUSTED_NETWORKS_CSV.stat().st_mtime_ns
+                )
+            except OSError as exc:
+                return {
+                    "ok": False,
+                    "state": "source_changed",
+                    "message": (
+                        "Trusted Baseline source became "
+                        "unavailable during generation: "
+                        + str(exc)
+                    ),
+                }, 409
+
+            if (
+                current_scan_mtime != scan_mtime
+                or current_trusted_mtime
+                    != trusted_mtime
+                or current_scan_fingerprint
+                    != scan_fingerprint
+                or current_trusted_fingerprint
+                    != trusted_fingerprint
+            ):
+                return {
+                    "ok": False,
+                    "state": "source_changed",
+                    "message": (
+                        "WiFi scan or trusted baseline changed "
+                        "during report generation. Run again."
+                    ),
+                }, 409
+
+            targets = [
+                (
+                    temporary_csv,
+                    TRUSTED_BASELINE_REPORT_CSV,
+                ),
+                (
+                    temporary_json,
+                    TRUSTED_BASELINE_REPORT_JSON,
+                ),
+            ]
+
+            backups = []
+
+            try:
+                for _, destination in targets:
+                    if destination.exists():
+                        backup = (
+                            temp_directory
+                            / (
+                                destination.name
+                                + ".backup"
+                            )
+                        )
+
+                        shutil.copy2(
+                            destination,
+                            backup,
+                        )
+
+                        backups.append(
+                            (
+                                destination,
+                                backup,
+                            )
+                        )
+
+                replaced = []
+
+                for source, destination in targets:
+                    source.replace(destination)
+                    replaced.append(destination)
+
+            except OSError as exc:
+                for destination in replaced:
+                    try:
+                        destination.unlink(
+                            missing_ok=True
+                        )
+                    except OSError:
+                        pass
+
+                for destination, backup in backups:
+                    if backup.exists():
+                        shutil.copy2(
+                            backup,
+                            destination,
+                        )
+
+                return {
+                    "ok": False,
+                    "state": "baseline_save_failed",
+                    "message": (
+                        "Trusted Baseline reports could not "
+                        "be saved atomically: "
+                        + str(exc)
+                    ),
+                }, 500
+
+    except subprocess.TimeoutExpired:
+        return {
+            "ok": False,
+            "state": "baseline_timeout",
+            "message": (
+                "Trusted Baseline generation timed out."
+            ),
+        }, 500
+
+    except OSError as exc:
+        return {
+            "ok": False,
+            "state": "baseline_error",
+            "message": str(exc),
+        }, 500
+
+    final_status = (
+        get_trusted_baseline_report_status()
+    )
+
+    return {
+        "ok": True,
+        "state": "completed",
+        "message": (
+            "Trusted Baseline reports generated successfully."
+        ),
+        "baseline_status":
+            final_status["status"],
+        "network_count":
+            payload["summary"].get(
+                "total_networks",
+                len(payload["findings"]),
+            ),
+        "summary": payload["summary"],
+        "reports": [
+            TRUSTED_BASELINE_REPORT_CSV.name,
+            TRUSTED_BASELINE_REPORT_JSON.name,
+        ],
+    }, 200
 
 
 def get_security_advisor_status() -> dict:
@@ -4616,6 +5106,22 @@ def run_alert_notifications() -> tuple[dict, int]:
             ALERT_NOTIFICATION_JSON.name,
         ],
     }, 200
+
+
+@app.post("/api/trusted-baseline/archive-legacy")
+def archive_legacy_trusted_baseline_route():
+    response, status_code = (
+        archive_legacy_trusted_baseline()
+    )
+    return jsonify(response), status_code
+
+
+@app.post("/api/trusted-baseline/generate")
+def generate_trusted_baseline():
+    response, status_code = (
+        run_trusted_baseline_generation()
+    )
+    return jsonify(response), status_code
 
 
 @app.post("/api/security-advisor/generate")
