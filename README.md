@@ -365,7 +365,72 @@ WiFi Scan
 → Security Advisor
 → Historical Trend Analysis
 → Alert Notification System
+
+Pre-Connect Safety Pipeline:
+WiFi Scan
++ Trusted SSID/BSSID Baseline
+→ Trusted Baseline Check
+→ Pre-Connect WiFi Safety Advisor
+→ Email Alert System
 ```
+
+## Trusted Baseline and Pre-Connect Safety
+
+NetShield also provides a separate pre-connect safety workflow for helping a user decide whether a detected WiFi network should be used.
+
+### Trusted Baseline Check
+
+The Trusted Baseline Checker compares the latest WiFi scan with:
+
+`trusted_baseline/trusted_networks.csv`
+
+Its current baseline-aware rules are:
+
+- Exact trusted SSID + BSSID -> `NORMAL`
+- Trusted SSID with a different BSSID -> `POSSIBLE_EVIL_TWIN_INDICATOR`
+- Open or WEP network -> `WEAK_OR_OPEN_NETWORK`
+- Secure network not present in the trusted baseline -> `UNKNOWN_NETWORK`
+
+A network that is simply unknown is not automatically treated as a Rogue AP.
+
+Generated reports:
+
+- `security_reports/trusted_baseline_report.csv`
+- `security_reports/trusted_baseline_report.json`
+
+The JSON report records the current analysis version and SHA-256 fingerprints of both the WiFi scan and trusted-network baseline. NetShield can therefore detect when saved baseline results are stale.
+
+Backend controls:
+
+- `POST /api/trusted-baseline/archive-legacy`
+- `POST /api/trusted-baseline/generate`
+
+Legacy reports are preserved before current provenance-aware reports are generated.
+
+### Pre-Connect WiFi Safety Advisor
+
+The Pre-Connect Safety Advisor reads the current Trusted Baseline report and converts technical findings into simple connection guidance.
+
+Examples:
+
+- Trusted network -> `SAFE_TO_CONNECT`
+- Unknown network -> `UNKNOWN_NETWORK` / `Use With Caution`
+- Possible Evil Twin -> `POSSIBLE_EVIL_TWIN` / `Avoid This Network`
+- Open or weak encryption -> `WEAK_SECURITY` / `Avoid This Network`
+
+Generated reports:
+
+- `security_reports/pre_connect_safety_report.csv`
+- `security_reports/pre_connect_safety_report.json`
+
+The Pre-Connect JSON report stores the SHA-256 fingerprint of the Trusted Baseline report used to create it. If that upstream report changes, NetShield marks the saved Pre-Connect results as stale.
+
+Backend controls:
+
+- `POST /api/pre-connect/archive-legacy`
+- `POST /api/pre-connect/generate`
+
+The Reports page displays the freshness state of both Trusted Baseline and Pre-Connect Safety reports and provides safe Archive, Generate, and Update controls.
 
 ## Important Demo Note
 

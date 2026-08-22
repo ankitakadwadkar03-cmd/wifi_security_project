@@ -21,11 +21,29 @@ function formatStatus(value) {
 
 export default function ReportsPage() {
   const [reports, setReports] = useState([]);
+  const [trustedBaselineStatus, setTrustedBaselineStatus] =
+    useState(null);
+  const [preConnectStatus, setPreConnectStatus] =
+    useState(null);
   const [advisorStatus, setAdvisorStatus] = useState(null);
   const [alertStatus, setAlertStatus] = useState(null);
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+
+  const [trustedBaselineLoading, setTrustedBaselineLoading] =
+    useState(false);
+  const [trustedBaselineMessage, setTrustedBaselineMessage] =
+    useState("");
+  const [trustedBaselineError, setTrustedBaselineError] =
+    useState("");
+
+  const [preConnectLoading, setPreConnectLoading] =
+    useState(false);
+  const [preConnectMessage, setPreConnectMessage] =
+    useState("");
+  const [preConnectError, setPreConnectError] =
+    useState("");
 
   const [advisorLoading, setAdvisorLoading] = useState(false);
   const [advisorMessage, setAdvisorMessage] = useState("");
@@ -55,6 +73,14 @@ export default function ReportsPage() {
         Array.isArray(data.reports)
           ? data.reports
           : []
+      );
+
+      setTrustedBaselineStatus(
+        data.trusted_baseline || null
+      );
+
+      setPreConnectStatus(
+        data.pre_connect_safety || null
       );
 
       setAdvisorStatus(
@@ -90,6 +116,247 @@ export default function ReportsPage() {
 
     return () => controller.abort();
   }, []);
+
+  async function archiveLegacyTrustedBaseline() {
+    if (
+      trustedBaselineLoading ||
+      !trustedBaselineStatus?.archive_legacy_url
+    ) {
+      return;
+    }
+
+    try {
+      setTrustedBaselineLoading(true);
+      setTrustedBaselineMessage("");
+      setTrustedBaselineError("");
+
+      const response = await fetch(
+        `${API_BASE_URL}${trustedBaselineStatus.archive_legacy_url}`,
+        {
+          method: "POST",
+        }
+      );
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          data.message ||
+            `Trusted Baseline archive returned HTTP ${response.status}`
+        );
+      }
+
+      setTrustedBaselineMessage(
+        `${data.message} Archived: ${
+          Array.isArray(data.archived_files)
+            ? data.archived_files.join(", ")
+            : "legacy baseline reports"
+        }.`
+      );
+
+      await loadReports();
+    } catch (archiveError) {
+      console.error(
+        "Trusted Baseline archive failed:",
+        archiveError
+      );
+
+      setTrustedBaselineError(
+        archiveError.message ||
+          "Legacy Trusted Baseline reports could not be archived."
+      );
+
+      await loadReports();
+    } finally {
+      setTrustedBaselineLoading(false);
+    }
+  }
+
+  async function generateTrustedBaseline() {
+    if (
+      trustedBaselineLoading ||
+      !trustedBaselineStatus?.generate_url ||
+      trustedBaselineStatus?.migration_required
+    ) {
+      return;
+    }
+
+    try {
+      setTrustedBaselineLoading(true);
+      setTrustedBaselineMessage("");
+      setTrustedBaselineError("");
+
+      const response = await fetch(
+        `${API_BASE_URL}${trustedBaselineStatus.generate_url}`,
+        {
+          method: "POST",
+        }
+      );
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          data.message ||
+            `Trusted Baseline generation returned HTTP ${response.status}`
+        );
+      }
+
+      const summary = data.summary || {};
+
+      setTrustedBaselineMessage(
+        data.state === "already_current"
+          ? data.message
+          : `${data.message} ${
+              data.network_count ?? 0
+            } network(s) checked: ${
+              summary.trusted ?? 0
+            } trusted, ${
+              summary.possible_evil_twin_indicators ?? 0
+            } possible Evil Twin indicator(s), ${
+              summary.unknown_networks ?? 0
+            } unknown, ${
+              summary.weak_or_open_networks ?? 0
+            } weak/open.`
+      );
+
+      await loadReports();
+    } catch (generationError) {
+      console.error(
+        "Trusted Baseline generation failed:",
+        generationError
+      );
+
+      setTrustedBaselineError(
+        generationError.message ||
+          "Trusted Baseline reports could not be generated."
+      );
+
+      await loadReports();
+    } finally {
+      setTrustedBaselineLoading(false);
+    }
+  }
+
+  async function archiveLegacyPreConnect() {
+    if (
+      preConnectLoading ||
+      !preConnectStatus?.archive_legacy_url
+    ) {
+      return;
+    }
+
+    try {
+      setPreConnectLoading(true);
+      setPreConnectMessage("");
+      setPreConnectError("");
+
+      const response = await fetch(
+        `${API_BASE_URL}${preConnectStatus.archive_legacy_url}`,
+        {
+          method: "POST",
+        }
+      );
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          data.message ||
+            `Pre-Connect archive returned HTTP ${response.status}`
+        );
+      }
+
+      setPreConnectMessage(
+        `${data.message} Archived: ${
+          Array.isArray(data.archived_files)
+            ? data.archived_files.join(", ")
+            : "legacy Pre-Connect reports"
+        }.`
+      );
+
+      await loadReports();
+    } catch (archiveError) {
+      console.error(
+        "Pre-Connect archive failed:",
+        archiveError
+      );
+
+      setPreConnectError(
+        archiveError.message ||
+          "Legacy Pre-Connect reports could not be archived."
+      );
+
+      await loadReports();
+    } finally {
+      setPreConnectLoading(false);
+    }
+  }
+
+  async function generatePreConnectSafety() {
+    if (
+      preConnectLoading ||
+      !preConnectStatus?.generate_url ||
+      preConnectStatus?.migration_required ||
+      preConnectStatus?.trusted_baseline_required
+    ) {
+      return;
+    }
+
+    try {
+      setPreConnectLoading(true);
+      setPreConnectMessage("");
+      setPreConnectError("");
+
+      const response = await fetch(
+        `${API_BASE_URL}${preConnectStatus.generate_url}`,
+        {
+          method: "POST",
+        }
+      );
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          data.message ||
+            `Pre-Connect generation returned HTTP ${response.status}`
+        );
+      }
+
+      const summary = data.summary || {};
+
+      setPreConnectMessage(
+        data.state === "already_current"
+          ? data.message
+          : `${data.message} ${
+              data.network_count ?? 0
+            } network(s) reviewed: ${
+              summary.safe_to_connect ?? 0
+            } safe, ${
+              summary.use_with_caution ?? 0
+            } caution, ${
+              summary.avoid_this_network ?? 0
+            } avoid.`
+      );
+
+      await loadReports();
+    } catch (generationError) {
+      console.error(
+        "Pre-Connect generation failed:",
+        generationError
+      );
+
+      setPreConnectError(
+        generationError.message ||
+          "Pre-Connect Safety reports could not be generated."
+      );
+
+      await loadReports();
+    } finally {
+      setPreConnectLoading(false);
+    }
+  }
 
   async function generateSecurityAdvisor() {
     if (
@@ -281,6 +548,29 @@ export default function ReportsPage() {
     );
   }
 
+  const legacyTrustedBaseline =
+    trustedBaselineStatus?.status === "legacy" &&
+    trustedBaselineStatus?.migration_required;
+
+  const trustedBaselineGenerationBlocked =
+    Boolean(
+      trustedBaselineStatus?.migration_required ||
+      trustedBaselineStatus?.status === "incomplete" ||
+      trustedBaselineStatus?.status === "unavailable"
+    );
+
+  const legacyPreConnect =
+    preConnectStatus?.status === "legacy" &&
+    preConnectStatus?.migration_required;
+
+  const preConnectGenerationBlocked =
+    Boolean(
+      preConnectStatus?.migration_required ||
+      preConnectStatus?.trusted_baseline_required ||
+      preConnectStatus?.status === "incomplete" ||
+      preConnectStatus?.status === "unavailable"
+    );
+
   const advisorBlocked =
     Boolean(
       advisorStatus?.threat_analysis_required
@@ -310,6 +600,238 @@ export default function ReportsPage() {
           analysis modules.
         </p>
       </div>
+
+      {!loading && !error && trustedBaselineStatus && (
+        <div className="advisorGenerationPanel">
+          <div className="advisorGenerationContent">
+            <div>
+              <span className="advisorGenerationLabel">
+                Pre-Connect Pipeline
+              </span>
+
+              <h2>Trusted Baseline Check</h2>
+
+              <p>
+                Compare the latest WiFi scan with the trusted
+                SSID/BSSID list before generating Pre-Connect
+                safety recommendations.
+              </p>
+            </div>
+
+            <div className="advisorGenerationStatus">
+              <StatusBadge
+                value={formatStatus(
+                  trustedBaselineStatus.status
+                )}
+              />
+
+              <span>
+                {trustedBaselineStatus.message}
+              </span>
+            </div>
+          </div>
+
+          <div className="advisorGenerationActions">
+            {legacyTrustedBaseline ? (
+              <>
+                <button
+                  type="button"
+                  className="primaryButton"
+                  onClick={archiveLegacyTrustedBaseline}
+                  disabled={
+                    trustedBaselineLoading ||
+                    !trustedBaselineStatus.archive_legacy_url
+                  }
+                >
+                  {trustedBaselineLoading
+                    ? "Archiving..."
+                    : "Archive Legacy Baseline Reports"}
+                </button>
+
+                <p>
+                  Preserve the older Trusted Baseline reports before
+                  generating provenance-aware results from the latest
+                  WiFi scan.
+                </p>
+              </>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  className="primaryButton"
+                  onClick={generateTrustedBaseline}
+                  disabled={
+                    trustedBaselineLoading ||
+                    trustedBaselineGenerationBlocked
+                  }
+                >
+                  {trustedBaselineLoading
+                    ? "Generating..."
+                    : trustedBaselineStatus.status === "current"
+                      ? "Update Trusted Baseline"
+                      : "Generate Trusted Baseline"}
+                </button>
+
+                {trustedBaselineStatus.generation_required &&
+                  !trustedBaselineStatus.migration_required && (
+                    <p>
+                      Generate the Trusted Baseline report from the
+                      current WiFi scan and trusted SSID/BSSID list.
+                    </p>
+                  )}
+
+                {!trustedBaselineStatus.generation_required &&
+                  trustedBaselineStatus.status === "current" && (
+                    <p>
+                      Trusted Baseline reports match the current WiFi
+                      scan and trusted-network baseline.
+                    </p>
+                  )}
+
+                {trustedBaselineStatus.migration_required &&
+                  !legacyTrustedBaseline && (
+                    <p>
+                      Saved Trusted Baseline outputs require review
+                      before they can be regenerated safely.
+                    </p>
+                  )}
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {trustedBaselineMessage && (
+        <p className="scannerActionMessage">
+          {trustedBaselineMessage}
+        </p>
+      )}
+
+      {trustedBaselineError && (
+        <p className="scannerActionMessage errorMessage">
+          {trustedBaselineError}
+        </p>
+      )}
+
+      {!loading && !error && preConnectStatus && (
+        <div className="advisorGenerationPanel">
+          <div className="advisorGenerationContent">
+            <div>
+              <span className="advisorGenerationLabel">
+                Pre-Connect Pipeline
+              </span>
+
+              <h2>Pre-Connect WiFi Safety Advisor</h2>
+
+              <p>
+                Convert the current Trusted Baseline findings into
+                simple connection guidance before a user joins a
+                WiFi network.
+              </p>
+            </div>
+
+            <div className="advisorGenerationStatus">
+              <StatusBadge
+                value={formatStatus(
+                  preConnectStatus.status
+                )}
+              />
+
+              <span>
+                {preConnectStatus.message}
+              </span>
+            </div>
+          </div>
+
+          <div className="advisorGenerationActions">
+            {legacyPreConnect ? (
+              <>
+                <button
+                  type="button"
+                  className="primaryButton"
+                  onClick={archiveLegacyPreConnect}
+                  disabled={
+                    preConnectLoading ||
+                    !preConnectStatus.archive_legacy_url
+                  }
+                >
+                  {preConnectLoading
+                    ? "Archiving..."
+                    : "Archive Legacy Pre-Connect Reports"}
+                </button>
+
+                <p>
+                  Preserve the older Pre-Connect Safety reports before
+                  generating results from the current Trusted Baseline.
+                </p>
+              </>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  className="primaryButton"
+                  onClick={generatePreConnectSafety}
+                  disabled={
+                    preConnectLoading ||
+                    preConnectGenerationBlocked
+                  }
+                >
+                  {preConnectLoading
+                    ? "Generating..."
+                    : preConnectStatus.status === "current"
+                      ? "Update Pre-Connect Safety"
+                      : "Generate Pre-Connect Safety"}
+                </button>
+
+                {preConnectStatus.trusted_baseline_required && (
+                  <p>
+                    Generate or update the Trusted Baseline report
+                    first. Pre-Connect Safety depends on that current
+                    baseline analysis.
+                  </p>
+                )}
+
+                {!preConnectStatus.trusted_baseline_required &&
+                  preConnectStatus.generation_required &&
+                  !preConnectStatus.migration_required && (
+                    <p>
+                      Pre-Connect Safety generation is available from
+                      the current Trusted Baseline report.
+                    </p>
+                  )}
+
+                {!preConnectStatus.generation_required &&
+                  preConnectStatus.status === "current" && (
+                    <p>
+                      Pre-Connect Safety matches the current Trusted
+                      Baseline report.
+                    </p>
+                  )}
+
+                {preConnectStatus.migration_required &&
+                  !legacyPreConnect && (
+                    <p>
+                      Saved Pre-Connect outputs require review before
+                      new reports can be generated.
+                    </p>
+                  )}
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {preConnectMessage && (
+        <p className="scannerActionMessage">
+          {preConnectMessage}
+        </p>
+      )}
+
+      {preConnectError && (
+        <p className="scannerActionMessage errorMessage">
+          {preConnectError}
+        </p>
+      )}
 
       {!loading && !error && advisorStatus && (
         <div className="advisorGenerationPanel">

@@ -1,14 +1,47 @@
+import argparse
 import csv
+import hashlib
 import json
 from pathlib import Path
 from datetime import datetime
 
 
-INPUT_REPORT = Path("security_reports/trusted_baseline_report.csv")
-OUTPUT_DIR = Path("security_reports")
+DEFAULT_INPUT_REPORT = Path(
+    "security_reports/trusted_baseline_report.csv"
+)
 
-OUTPUT_CSV = OUTPUT_DIR / "pre_connect_safety_report.csv"
-OUTPUT_JSON = OUTPUT_DIR / "pre_connect_safety_report.json"
+DEFAULT_OUTPUT_CSV = Path(
+    "security_reports/pre_connect_safety_report.csv"
+)
+
+DEFAULT_OUTPUT_JSON = Path(
+    "security_reports/pre_connect_safety_report.json"
+)
+
+CURRENT_PRE_CONNECT_VERSION = "baseline-aware-v2"
+
+
+def calculate_sha256(path):
+    """Return SHA-256 for the Trusted Baseline source report."""
+
+    path = Path(path)
+
+    if (
+        not path.is_file()
+        or path.stat().st_size == 0
+    ):
+        return None
+
+    digest = hashlib.sha256()
+
+    with path.open("rb") as source_file:
+        for chunk in iter(
+            lambda: source_file.read(65536),
+            b"",
+        ):
+            digest.update(chunk)
+
+    return digest.hexdigest()
 
 
 def clean(value):
@@ -162,20 +195,30 @@ def build_reason_and_advice(row):
     }
 
 
-def read_input_rows():
-    if not INPUT_REPORT.exists():
+def read_input_rows(input_report):
+    input_report = Path(input_report)
+
+    if not input_report.exists():
         raise FileNotFoundError(
-            f"Input file not found: {INPUT_REPORT}. Run trusted_baseline_checker.py first."
+            f"Input file not found: {input_report}. "
+            "Run trusted_baseline_checker.py first."
         )
 
-    with INPUT_REPORT.open("r", newline="", encoding="utf-8") as file:
+    with input_report.open(
+        "r",
+        newline="",
+        encoding="utf-8",
+    ) as file:
         reader = csv.DictReader(file)
         return list(reader)
 
 
-def write_csv(rows):
-    if not rows:
-        return
+def write_csv(output_csv, rows):
+    output_csv = Path(output_csv)
+    output_csv.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
     fieldnames = [
         "SSID",
@@ -194,13 +237,30 @@ def write_csv(rows):
         "Advice",
     ]
 
-    with OUTPUT_CSV.open("w", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(file, fieldnames=fieldnames)
+    with output_csv.open(
+        "w",
+        newline="",
+        encoding="utf-8",
+    ) as file:
+        writer = csv.DictWriter(
+            file,
+            fieldnames=fieldnames,
+        )
         writer.writeheader()
         writer.writerows(rows)
 
 
-def write_json(rows):
+def write_json(
+    output_json,
+    rows,
+    source_report_sha256,
+):
+    output_json = Path(output_json)
+    output_json.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
     summary = {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "total_networks": len(rows),
@@ -214,15 +274,34 @@ def write_json(rows):
 
     data = {
         "module": "Pre-Connect WiFi Safety Advisor",
+        "analysis_version":
+            CURRENT_PRE_CONNECT_VERSION,
+        "generated_at":
+            datetime.now().isoformat(
+                timespec="seconds"
+            ),
+        "source_trusted_baseline_report_sha256":
+            source_report_sha256,
         "summary": summary,
         "networks": rows,
     }
 
-    with OUTPUT_JSON.open("w", encoding="utf-8") as file:
-        json.dump(data, file, indent=4)
+    with output_json.open(
+        "w",
+        encoding="utf-8",
+    ) as file:
+        json.dump(
+            data,
+            file,
+            indent=4,
+        )
 
 
-def print_summary(rows):
+def print_summary(
+    rows,
+    output_csv,
+    output_json,
+):
     print("\nPre-Connect WiFi Safety Advisor Completed")
     print("-----------------------------------------")
     print(f"Total Networks           : {len(rows)}")
@@ -233,19 +312,91 @@ def print_summary(rows):
     print(f"Weak Security            : {sum(1 for row in rows if row['Safety_Verdict'] == 'WEAK_SECURITY')}")
     print(f"Unknown Networks         : {sum(1 for row in rows if row['Safety_Verdict'] == 'UNKNOWN_NETWORK')}")
     print()
-    print(f"[OK] CSV report saved to  : {OUTPUT_CSV}")
-    print(f"[OK] JSON report saved to : {OUTPUT_JSON}")
+    print(f"[OK] CSV report saved to  : {output_csv}")
+    print(f"[OK] JSON report saved to : {output_json}")
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description=(
+            "Generate Pre-Connect WiFi safety "
+            "recommendations from a Trusted Baseline report."
+        )
+    )
+
+    parser.add_argument(
+        "--input-report",
+        default=str(DEFAULT_INPUT_REPORT),
+        help="Path to trusted_baseline_report.csv",
+    )
+
+    parser.add_argument(
+        "--output-csv",
+        default=str(DEFAULT_OUTPUT_CSV),
+        help="Path to Pre-Connect CSV output",
+    )
+
+    parser.add_argument(
+        "--output-json",
+        default=str(DEFAULT_OUTPUT_JSON),
+        help="Path to Pre-Connect JSON output",
+    )
+
+    return parser.parse_args()
 
 
 def main():
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    args = parse_args()
 
-    input_rows = read_input_rows()
-    advisor_rows = [build_reason_and_advice(row) for row in input_rows]
+    input_report = Path(
+        args.input_report
+    )
 
-    write_csv(advisor_rows)
-    write_json(advisor_rows)
-    print_summary(advisor_rows)
+    output_csv = Path(
+        args.output_csv
+    )
+
+    output_json = Path(
+        args.output_json
+    )
+
+    source_report_sha256 = (
+        calculate_sha256(
+            input_report
+        )
+    )
+
+    if source_report_sha256 is None:
+        raise RuntimeError(
+            "Trusted Baseline source report "
+            "could not be fingerprinted."
+        )
+
+    input_rows = read_input_rows(
+        input_report
+    )
+
+    advisor_rows = [
+        build_reason_and_advice(row)
+        for row in input_rows
+    ]
+
+    write_csv(
+        output_csv,
+        advisor_rows,
+    )
+
+    write_json(
+        output_json,
+        advisor_rows,
+        source_report_sha256,
+    )
+
+    print_summary(
+        advisor_rows,
+        output_csv,
+        output_json,
+    )
 
 
 if __name__ == "__main__":

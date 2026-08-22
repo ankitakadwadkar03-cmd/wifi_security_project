@@ -1,5 +1,6 @@
 import argparse
 import csv
+import hashlib
 import json
 from collections import defaultdict
 from datetime import datetime
@@ -11,8 +12,32 @@ DEFAULT_TRUSTED_CSV = Path("trusted_baseline/trusted_networks.csv")
 DEFAULT_OUTPUT_CSV = Path("security_reports/trusted_baseline_report.csv")
 DEFAULT_OUTPUT_JSON = Path("security_reports/trusted_baseline_report.json")
 
+CURRENT_BASELINE_REPORT_VERSION = "baseline-aware-v2"
 
 WEAK_ENCRYPTION_VALUES = {"OPEN", "WEP"}
+
+
+def calculate_sha256(path):
+    """Return SHA-256 for one baseline source file."""
+
+    path = Path(path)
+
+    if (
+        not path.is_file()
+        or path.stat().st_size == 0
+    ):
+        return None
+
+    digest = hashlib.sha256()
+
+    with path.open("rb") as source_file:
+        for chunk in iter(
+            lambda: source_file.read(65536),
+            b"",
+        ):
+            digest.update(chunk)
+
+    return digest.hexdigest()
 
 
 def normalize_text(value):
@@ -67,17 +92,42 @@ def write_csv_report(path, rows):
         writer.writerows(rows)
 
 
-def write_json_report(path, rows, summary):
-    path.parent.mkdir(parents=True, exist_ok=True)
+def write_json_report(
+    path,
+    rows,
+    summary,
+    scan_sha256,
+    trusted_baseline_sha256,
+):
+    path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
     data = {
-        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "analysis_version":
+            CURRENT_BASELINE_REPORT_VERSION,
+        "generated_at":
+            datetime.now().isoformat(
+                timespec="seconds"
+            ),
+        "source_scan_sha256":
+            scan_sha256,
+        "source_trusted_baseline_sha256":
+            trusted_baseline_sha256,
         "summary": summary,
         "findings": rows,
     }
 
-    with path.open("w", encoding="utf-8") as file:
-        json.dump(data, file, indent=2)
+    with path.open(
+        "w",
+        encoding="utf-8",
+    ) as file:
+        json.dump(
+            data,
+            file,
+            indent=2,
+        )
 
 
 def build_trusted_indexes(trusted_rows):
@@ -338,6 +388,24 @@ def main():
     scan_rows = read_csv_rows(scan_csv)
     trusted_rows = read_csv_rows(trusted_csv)
 
+    scan_sha256 = calculate_sha256(
+        scan_csv
+    )
+
+    trusted_baseline_sha256 = (
+        calculate_sha256(
+            trusted_csv
+        )
+    )
+
+    if (
+        scan_sha256 is None
+        or trusted_baseline_sha256 is None
+    ):
+        raise RuntimeError(
+            "Baseline source fingerprinting failed."
+        )
+
     trusted_by_bssid, trusted_by_ssid = build_trusted_indexes(trusted_rows)
     scan_bssids_by_ssid = build_scan_ssid_index(scan_rows)
 
@@ -353,10 +421,24 @@ def main():
 
     summary = build_summary(report_rows)
 
-    write_csv_report(output_csv, report_rows)
-    write_json_report(output_json, report_rows, summary)
+    write_csv_report(
+        output_csv,
+        report_rows,
+    )
 
-    print_summary(summary, output_csv, output_json)
+    write_json_report(
+        output_json,
+        report_rows,
+        summary,
+        scan_sha256,
+        trusted_baseline_sha256,
+    )
+
+    print_summary(
+        summary,
+        output_csv,
+        output_json,
+    )
 
 
 if __name__ == "__main__":
