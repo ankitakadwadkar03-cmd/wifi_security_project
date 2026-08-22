@@ -48,6 +48,17 @@ SECURITY_ADVISOR_JSON = (
     REPORTS_DIRECTORY
     / "security_advisor_report.json"
 )
+
+TRUSTED_BASELINE_REPORT_CSV = (
+    REPORTS_DIRECTORY
+    / "trusted_baseline_report.csv"
+)
+TRUSTED_BASELINE_REPORT_JSON = (
+    REPORTS_DIRECTORY
+    / "trusted_baseline_report.json"
+)
+CURRENT_TRUSTED_BASELINE_VERSION = "baseline-aware-v2"
+
 HISTORY_DB = PROJECT_ROOT / "security_reports" / "history.db"
 HISTORICAL_TREND_TEXT = (
     REPORTS_DIRECTORY
@@ -843,6 +854,196 @@ def get_threat_report_status() -> dict:
     }
 
 
+def get_trusted_baseline_report_status() -> dict:
+    """Check whether generated Trusted Baseline reports match current sources."""
+
+    report_files = [
+        TRUSTED_BASELINE_REPORT_CSV,
+        TRUSTED_BASELINE_REPORT_JSON,
+    ]
+
+    existing_files = [
+        report
+        for report in report_files
+        if report.exists()
+    ]
+
+    if not existing_files:
+        return {
+            "status": "missing",
+            "generation_required": True,
+            "analysis_version": None,
+            "current_version":
+                CURRENT_TRUSTED_BASELINE_VERSION,
+            "migration_required": False,
+            "message": (
+                "No current Trusted Baseline report exists yet. "
+                "Generate it from the latest WiFi scan and "
+                "trusted-network baseline."
+            ),
+        }
+
+    if len(existing_files) != len(report_files):
+        return {
+            "status": "incomplete",
+            "generation_required": True,
+            "analysis_version": None,
+            "current_version":
+                CURRENT_TRUSTED_BASELINE_VERSION,
+            "migration_required": True,
+            "message": (
+                "Trusted Baseline report files are incomplete "
+                "and cannot be treated as current."
+            ),
+        }
+
+    try:
+        payload = json.loads(
+            TRUSTED_BASELINE_REPORT_JSON.read_text(
+                encoding="utf-8"
+            )
+        )
+    except (
+        OSError,
+        json.JSONDecodeError,
+    ) as exc:
+        return {
+            "status": "unavailable",
+            "generation_required": True,
+            "analysis_version": None,
+            "current_version":
+                CURRENT_TRUSTED_BASELINE_VERSION,
+            "migration_required": True,
+            "message": (
+                "Trusted Baseline JSON could not be "
+                "validated: "
+                + str(exc)
+            ),
+        }
+
+    stored_version = str(
+        payload.get(
+            "analysis_version",
+            "",
+        )
+    ).strip()
+
+    stored_scan_fingerprint = str(
+        payload.get(
+            "source_scan_sha256",
+            "",
+        )
+    ).strip()
+
+    stored_baseline_fingerprint = str(
+        payload.get(
+            "source_trusted_baseline_sha256",
+            "",
+        )
+    ).strip()
+
+    if (
+        stored_version
+            != CURRENT_TRUSTED_BASELINE_VERSION
+        or not stored_scan_fingerprint
+        or not stored_baseline_fingerprint
+    ):
+        return {
+            "status": "legacy",
+            "generation_required": True,
+            "analysis_version": (
+                stored_version
+                or "legacy-pre-provenance"
+            ),
+            "current_version":
+                CURRENT_TRUSTED_BASELINE_VERSION,
+            "migration_required": True,
+            "message": (
+                "Saved Trusted Baseline reports were "
+                "created before the current provenance-aware "
+                "format and are not treated as current."
+            ),
+        }
+
+    current_scan_fingerprint = (
+        _calculate_file_sha256(
+            NETWORK_CSV
+        )
+    )
+
+    current_baseline_fingerprint = (
+        _calculate_file_sha256(
+            TRUSTED_NETWORKS_CSV
+        )
+    )
+
+    if (
+        current_scan_fingerprint is None
+        or current_baseline_fingerprint is None
+    ):
+        return {
+            "status": "unavailable",
+            "generation_required": True,
+            "analysis_version": stored_version,
+            "current_version":
+                CURRENT_TRUSTED_BASELINE_VERSION,
+            "migration_required": False,
+            "message": (
+                "Current WiFi scan or trusted-network "
+                "baseline could not be fingerprinted."
+            ),
+        }
+
+    stale_sources = []
+
+    if (
+        stored_scan_fingerprint
+        != current_scan_fingerprint
+    ):
+        stale_sources.append(
+            "WiFi scan"
+        )
+
+    if (
+        stored_baseline_fingerprint
+        != current_baseline_fingerprint
+    ):
+        stale_sources.append(
+            "trusted baseline"
+        )
+
+    if stale_sources:
+        return {
+            "status": "stale",
+            "generation_required": True,
+            "analysis_version": stored_version,
+            "current_version":
+                CURRENT_TRUSTED_BASELINE_VERSION,
+            "migration_required": False,
+            "stale_sources": stale_sources,
+            "message": (
+                "Saved Trusted Baseline reports do not match "
+                "the current "
+                + ", ".join(stale_sources)
+                + ". Generate them again."
+            ),
+        }
+
+    return {
+        "status": "current",
+        "generation_required": False,
+        "analysis_version": stored_version,
+        "current_version":
+            CURRENT_TRUSTED_BASELINE_VERSION,
+        "migration_required": False,
+        "stale_sources": [],
+        "message": (
+            "Trusted Baseline reports match the current "
+            "WiFi scan and trusted-network baseline."
+        ),
+    }
+
+
 def get_security_advisor_status() -> dict:
     """Check whether saved Security Advisor reports are current."""
 
@@ -1353,6 +1554,9 @@ def read_reports() -> list[dict]:
     report_rows: list[dict] = []
     advisor_status = get_security_advisor_status()
     alert_status = get_alert_notification_status()
+    trusted_baseline_status = (
+        get_trusted_baseline_report_status()
+    )
 
     advisor_filenames = {
         SECURITY_ADVISOR_TEXT.name,
@@ -1362,6 +1566,11 @@ def read_reports() -> list[dict]:
     alert_filenames = {
         ALERT_NOTIFICATION_LOG.name,
         ALERT_NOTIFICATION_JSON.name,
+    }
+
+    trusted_baseline_filenames = {
+        TRUSTED_BASELINE_REPORT_CSV.name,
+        TRUSTED_BASELINE_REPORT_JSON.name,
     }
 
     for report_path in REPORTS_DIRECTORY.iterdir():
@@ -1429,6 +1638,27 @@ def read_reports() -> list[dict]:
                     "freshness_message": alert_status[
                         "message"
                     ],
+                }
+            )
+
+        if (
+            report_path.name
+            in trusted_baseline_filenames
+        ):
+            report_row.update(
+                {
+                    "freshness_status":
+                        trusted_baseline_status[
+                            "status"
+                        ],
+                    "generation_required":
+                        trusted_baseline_status[
+                            "generation_required"
+                        ],
+                    "freshness_message":
+                        trusted_baseline_status[
+                            "message"
+                        ],
                 }
             )
 
