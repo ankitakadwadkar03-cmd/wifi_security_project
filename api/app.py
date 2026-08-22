@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import os
 import signal
@@ -48,6 +49,18 @@ SECURITY_ADVISOR_JSON = (
     / "security_advisor_report.json"
 )
 HISTORY_DB = PROJECT_ROOT / "security_reports" / "history.db"
+HISTORICAL_TREND_TEXT = (
+    REPORTS_DIRECTORY
+    / "historical_trend_report.txt"
+)
+HISTORICAL_TREND_JSON = (
+    REPORTS_DIRECTORY
+    / "historical_trend_report.json"
+)
+LEGACY_HISTORY_DIRECTORY = (
+    REPORTS_DIRECTORY
+    / "legacy_history"
+)
 ALLOWED_REPORT_EXTENSIONS = {".csv", ".json", ".txt", ".log"}
 
 SYSTEMCTL_PATH = "/usr/bin/systemctl"
@@ -1087,8 +1100,270 @@ def _get_safe_report(filename: str) -> Path | None:
     return report_path
 
 
+def get_history_storage_status() -> dict:
+    """Inspect history compatibility without modifying the database."""
+
+    current_version = "baseline-aware-v2"
+
+    if not HISTORY_DB.exists():
+        return {
+            "status": "missing",
+            "analysis_version": None,
+            "current_version": current_version,
+            "migration_required": False,
+            "message": (
+                "No current historical database exists yet. "
+                "Generate Historical Trends after completing "
+                "current Threat Analysis."
+            ),
+        }
+
+    try:
+        with sqlite3.connect(HISTORY_DB) as connection:
+            tables = {
+                row[0]
+                for row in connection.execute(
+                    """
+                    SELECT name
+                    FROM sqlite_master
+                    WHERE type = 'table'
+                    """
+                ).fetchall()
+            }
+
+            if "scan_history" not in tables:
+                return {
+                    "status": "unavailable",
+                    "analysis_version": None,
+                    "current_version": current_version,
+                    "migration_required": True,
+                    "message": (
+                        "History database does not contain the "
+                        "expected scan_history table."
+                    ),
+                }
+
+            history_count = connection.execute(
+                "SELECT COUNT(*) FROM scan_history"
+            ).fetchone()[0]
+
+            if "history_metadata" not in tables:
+                if history_count > 0:
+                    return {
+                        "status": "legacy",
+                        "analysis_version":
+                            "legacy-pre-baseline",
+                        "current_version": current_version,
+                        "migration_required": True,
+                        "message": (
+                            "Saved history was created by the older "
+                            "threat-detection logic and is not mixed "
+                            "with current baseline-aware history."
+                        ),
+                    }
+
+                return {
+                    "status": "empty",
+                    "analysis_version": None,
+                    "current_version": current_version,
+                    "migration_required": False,
+                    "message": (
+                        "History database is empty and has not yet "
+                        "stored a baseline-aware analysis."
+                    ),
+                }
+
+            version_row = connection.execute(
+                """
+                SELECT value
+                FROM history_metadata
+                WHERE key = 'analysis_version'
+                """
+            ).fetchone()
+
+            stored_version = (
+                str(version_row[0]).strip()
+                if version_row
+                else None
+            )
+
+            if stored_version != current_version:
+                return {
+                    "status": "legacy",
+                    "analysis_version": (
+                        stored_version
+                        or "legacy-pre-baseline"
+                    ),
+                    "current_version": current_version,
+                    "migration_required": True,
+                    "message": (
+                        "Saved history uses an older analysis "
+                        "version and is not shown as current "
+                        "NetShield history."
+                    ),
+                }
+
+            return {
+                "status": "current",
+                "analysis_version": stored_version,
+                "current_version": current_version,
+                "migration_required": False,
+                "message": (
+                    "Historical data uses the current "
+                    "baseline-aware analysis version."
+                ),
+            }
+
+    except sqlite3.Error as database_error:
+        return {
+            "status": "unavailable",
+            "analysis_version": None,
+            "current_version": current_version,
+            "migration_required": True,
+            "message": (
+                "History database could not be inspected: "
+                + str(database_error)
+            ),
+        }
+
+
+def archive_legacy_history() -> tuple[dict, int]:
+    """Archive legacy history without deleting historical evidence."""
+
+    storage_status = get_history_storage_status()
+
+    if storage_status["status"] != "legacy":
+        return {
+            "ok": False,
+            "state": "archive_not_required",
+            "message": (
+                "Legacy history archive is not required for "
+                f"history status {storage_status['status']}."
+            ),
+            "history_status": storage_status["status"],
+        }, 409
+
+    source_files = [
+        HISTORY_DB,
+        HISTORICAL_TREND_TEXT,
+        HISTORICAL_TREND_JSON,
+    ]
+
+    existing_files = [
+        source
+        for source in source_files
+        if source.exists()
+    ]
+
+    if not existing_files:
+        return {
+            "ok": False,
+            "state": "legacy_files_missing",
+            "message": (
+                "Legacy history was detected but no archiveable "
+                "history files were found."
+            ),
+        }, 409
+
+    archive_stamp = datetime.now(
+        timezone.utc
+    ).strftime(
+        "%Y%m%dT%H%M%S%fZ"
+    )
+
+    archive_directory = (
+        LEGACY_HISTORY_DIRECTORY
+        / archive_stamp
+    )
+
+    moved_files: list[tuple[Path, Path]] = []
+
+    try:
+        archive_directory.mkdir(
+            parents=True,
+            exist_ok=False,
+        )
+
+        for source in existing_files:
+            destination = (
+                archive_directory
+                / source.name
+            )
+
+            source.replace(destination)
+
+            moved_files.append(
+                (
+                    source,
+                    destination,
+                )
+            )
+
+    except OSError as exc:
+        # Restore anything already moved so an incomplete
+        # archive operation does not lose the active files.
+        for source, destination in reversed(
+            moved_files
+        ):
+            if destination.exists():
+                destination.replace(source)
+
+        try:
+            archive_directory.rmdir()
+        except OSError:
+            pass
+
+        return {
+            "ok": False,
+            "state": "archive_failed",
+            "message": (
+                "Legacy history could not be archived: "
+                + str(exc)
+            ),
+        }, 500
+
+    try:
+        archive_display_path = str(
+            archive_directory.relative_to(
+                PROJECT_ROOT
+            )
+        )
+    except ValueError:
+        archive_display_path = str(
+            archive_directory
+        )
+
+    return {
+        "ok": True,
+        "state": "archived",
+        "message": (
+            "Legacy history was archived successfully. "
+            "NetShield can now begin a clean baseline-aware "
+            "history timeline."
+        ),
+        "archive_directory": archive_display_path,
+        "archived_files": [
+            destination.name
+            for _, destination in moved_files
+        ],
+    }, 200
+
+
 def read_history() -> dict:
-    """Read saved scan summaries and findings from the history database."""
+    """Read only current-version historical analysis data."""
+
+    storage_status = get_history_storage_status()
+    threat_status = get_threat_report_status()
+
+    generation_allowed = (
+        storage_status["status"] in {
+            "missing",
+            "empty",
+            "current",
+        }
+        and threat_status["status"] == "current"
+    )
+
     empty_result = {
         "scan_count": 0,
         "latest": None,
@@ -1100,9 +1375,32 @@ def read_history() -> dict:
             "score_change": None,
             "finding_change": None,
         },
+        "history_status": storage_status["status"],
+        "analysis_version": storage_status[
+            "analysis_version"
+        ],
+        "current_version": storage_status[
+            "current_version"
+        ],
+        "migration_required": storage_status[
+            "migration_required"
+        ],
+        "message": storage_status["message"],
+        "archive_legacy_url": (
+            "/api/history/archive-legacy"
+            if storage_status["status"] == "legacy"
+            else None
+        ),
+        "generate_url": "/api/history/generate",
+        "generation_allowed": generation_allowed,
+        "threat_report_status": threat_status["status"],
+        "threat_analysis_required": threat_status[
+            "analysis_required"
+        ],
+        "threat_report_message": threat_status["message"],
     }
 
-    if not HISTORY_DB.exists():
+    if storage_status["status"] != "current":
         return empty_result
 
     try:
@@ -1120,6 +1418,9 @@ def read_history() -> dict:
                     danger_count,
                     rogue_count,
                     evil_twin_count,
+                    suspicious_count,
+                    weak_encryption_count,
+                    unknown_network_count,
                     average_security_score
                 FROM scan_summary
                 ORDER BY scan_timestamp DESC
@@ -1139,29 +1440,72 @@ def read_history() -> dict:
                     risk_level,
                     attack_type
                 FROM scan_history
-                WHERE UPPER(COALESCE(attack_type, 'NORMAL')) <> 'NORMAL'
-                ORDER BY scan_timestamp DESC, scan_id DESC
+                WHERE UPPER(
+                    COALESCE(
+                        attack_type,
+                        'NORMAL'
+                    )
+                ) <> 'NORMAL'
+                ORDER BY
+                    scan_timestamp DESC,
+                    scan_id DESC
                 LIMIT 12
                 """
             ).fetchall()
+
     except sqlite3.Error as database_error:
-        print(f"[WARNING] Unable to read history database: {database_error}")
-        return empty_result
+        result = dict(empty_result)
+
+        result.update(
+            {
+                "history_status": "unavailable",
+                "migration_required": True,
+                "message": (
+                    "Unable to read current history database: "
+                    + str(database_error)
+                ),
+            }
+        )
+
+        return result
 
     summaries = []
 
     for row in summary_rows:
         summary = dict(row)
-        summary["potential_findings"] = (
-            int(summary.get("rogue_count") or 0)
-            + int(summary.get("evil_twin_count") or 0)
+
+        summary["potential_findings"] = sum(
+            int(
+                summary.get(column)
+                or 0
+            )
+            for column in (
+                "rogue_count",
+                "evil_twin_count",
+                "suspicious_count",
+                "weak_encryption_count",
+                "unknown_network_count",
+            )
         )
+
         summaries.append(summary)
 
-    findings = [dict(row) for row in finding_rows]
+    findings = [
+        dict(row)
+        for row in finding_rows
+    ]
 
-    latest = summaries[0] if summaries else None
-    previous = summaries[1] if len(summaries) > 1 else None
+    latest = (
+        summaries[0]
+        if summaries
+        else None
+    )
+
+    previous = (
+        summaries[1]
+        if len(summaries) > 1
+        else None
+    )
 
     trends = {
         "network_change": None,
@@ -1172,17 +1516,47 @@ def read_history() -> dict:
     if latest and previous:
         trends = {
             "network_change": (
-                int(latest["total_networks"] or 0)
-                - int(previous["total_networks"] or 0)
+                int(
+                    latest[
+                        "total_networks"
+                    ]
+                    or 0
+                )
+                - int(
+                    previous[
+                        "total_networks"
+                    ]
+                    or 0
+                )
             ),
             "score_change": round(
-                float(latest["average_security_score"] or 0)
-                - float(previous["average_security_score"] or 0),
+                float(
+                    latest[
+                        "average_security_score"
+                    ]
+                    or 0
+                )
+                - float(
+                    previous[
+                        "average_security_score"
+                    ]
+                    or 0
+                ),
                 1,
             ),
             "finding_change": (
-                int(latest["potential_findings"] or 0)
-                - int(previous["potential_findings"] or 0)
+                int(
+                    latest[
+                        "potential_findings"
+                    ]
+                    or 0
+                )
+                - int(
+                    previous[
+                        "potential_findings"
+                    ]
+                    or 0
+                )
             ),
         }
 
@@ -1193,8 +1567,24 @@ def read_history() -> dict:
         "summaries": summaries,
         "recent_findings": findings,
         "trends": trends,
+        "history_status": "current",
+        "analysis_version": storage_status[
+            "analysis_version"
+        ],
+        "current_version": storage_status[
+            "current_version"
+        ],
+        "migration_required": False,
+        "message": storage_status["message"],
+        "archive_legacy_url": None,
+        "generate_url": "/api/history/generate",
+        "generation_allowed": generation_allowed,
+        "threat_report_status": threat_status["status"],
+        "threat_analysis_required": threat_status[
+            "analysis_required"
+        ],
+        "threat_report_message": threat_status["message"],
     }
-
 
 def _read_interface_capabilities(interface: str) -> dict:
     """Read supported WiFi bands and enabled channels for an interface."""
@@ -2355,6 +2745,610 @@ def run_threat_analysis() -> tuple[dict, int]:
     }, 200
 
 
+def _calculate_file_sha256(
+    path: Path,
+) -> str | None:
+    """Return SHA-256 for a file without modifying it."""
+
+    if not path.exists() or not path.is_file():
+        return None
+
+    digest = hashlib.sha256()
+
+    try:
+        with path.open("rb") as input_file:
+            for chunk in iter(
+                lambda: input_file.read(
+                    1024 * 1024
+                ),
+                b"",
+            ):
+                digest.update(chunk)
+    except OSError:
+        return None
+
+    return digest.hexdigest()
+
+
+def _read_history_source_fingerprint() -> str | None:
+    """Read the last Threat Analysis fingerprint from active history."""
+
+    if not HISTORY_DB.exists():
+        return None
+
+    try:
+        with sqlite3.connect(HISTORY_DB) as connection:
+            tables = {
+                row[0]
+                for row in connection.execute(
+                    """
+                    SELECT name
+                    FROM sqlite_master
+                    WHERE type = 'table'
+                    """
+                ).fetchall()
+            }
+
+            if "history_metadata" not in tables:
+                return None
+
+            row = connection.execute(
+                """
+                SELECT value
+                FROM history_metadata
+                WHERE key = 'last_source_sha256'
+                """
+            ).fetchone()
+
+            if not row:
+                return None
+
+            value = str(row[0]).strip()
+
+            return value or None
+
+    except sqlite3.Error:
+        return None
+
+
+def run_historical_trends() -> tuple[dict, int]:
+    """Safely store current Threat Analysis in historical trends."""
+
+    threat_status = get_threat_report_status()
+
+    if threat_status["status"] != "current":
+        return {
+            "ok": False,
+            "state": "threat_analysis_required",
+            "message": threat_status["message"],
+            "report_status": threat_status["status"],
+            "analysis_required": True,
+            "stale_sources": threat_status[
+                "stale_sources"
+            ],
+        }, 409
+
+    history_status = get_history_storage_status()
+
+    if history_status["status"] == "legacy":
+        return {
+            "ok": False,
+            "state": "legacy_history_detected",
+            "message": (
+                "Legacy history must be archived before "
+                "starting the baseline-aware timeline."
+            ),
+            "history_status": "legacy",
+            "migration_required": True,
+            "archive_legacy_url":
+                "/api/history/archive-legacy",
+        }, 409
+
+    if history_status["status"] == "unavailable":
+        return {
+            "ok": False,
+            "state": "history_unavailable",
+            "message": history_status["message"],
+            "history_status": "unavailable",
+        }, 409
+
+    try:
+        source_report_mtime = (
+            SECURITY_REPORT_CSV.stat().st_mtime_ns
+        )
+    except OSError as exc:
+        return {
+            "ok": False,
+            "state": "report_unavailable",
+            "message": (
+                "Threat report could not be accessed: "
+                + str(exc)
+            ),
+        }, 500
+
+    source_fingerprint = _calculate_file_sha256(
+        SECURITY_REPORT_CSV
+    )
+
+    if source_fingerprint is None:
+        return {
+            "ok": False,
+            "state": "report_unavailable",
+            "message": (
+                "Threat report could not be fingerprinted "
+                "for historical storage."
+            ),
+        }, 500
+
+    stored_fingerprint = (
+        _read_history_source_fingerprint()
+    )
+
+    if (
+        stored_fingerprint
+        and stored_fingerprint
+        == source_fingerprint
+    ):
+        return {
+            "ok": True,
+            "state": "already_recorded",
+            "message": (
+                "This exact Threat Analysis is already "
+                "stored in history. No duplicate snapshot "
+                "was created."
+            ),
+            "source_report_sha256":
+                source_fingerprint,
+            "history": read_history(),
+        }, 200
+
+    REPORTS_DIRECTORY.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix="netshield-history-",
+            dir=REPORTS_DIRECTORY,
+        ) as temp_directory:
+            temp_directory = Path(
+                temp_directory
+            )
+
+            temporary_database = (
+                temp_directory
+                / "history.db"
+            )
+
+            temporary_text = (
+                temp_directory
+                / "historical_trend_report.txt"
+            )
+
+            temporary_json = (
+                temp_directory
+                / "historical_trend_report.json"
+            )
+
+            if HISTORY_DB.exists():
+                shutil.copy2(
+                    HISTORY_DB,
+                    temporary_database,
+                )
+
+            module_8 = subprocess.run(
+                [
+                    sys.executable,
+                    str(
+                        PROJECT_ROOT
+                        / "historical_trends"
+                        / "historical_trend_engine.py"
+                    ),
+                    "--report-csv",
+                    str(SECURITY_REPORT_CSV),
+                    "--database",
+                    str(temporary_database),
+                    "--text-output",
+                    str(temporary_text),
+                    "--json-output",
+                    str(temporary_json),
+                ],
+                cwd=PROJECT_ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+            if module_8.returncode != 0:
+                return {
+                    "ok": False,
+                    "state": "history_generation_failed",
+                    "message": (
+                        module_8.stderr.strip()
+                        or module_8.stdout.strip()
+                        or (
+                            "Historical Trend generation "
+                            "failed."
+                        )
+                    ),
+                }, 500
+
+            required_outputs = [
+                temporary_database,
+                temporary_text,
+                temporary_json,
+            ]
+
+            if not all(
+                output.exists()
+                for output in required_outputs
+            ):
+                return {
+                    "ok": False,
+                    "state": "history_output_missing",
+                    "message": (
+                        "Historical Trend generation did "
+                        "not produce the database and both "
+                        "report files."
+                    ),
+                }, 500
+
+            try:
+                report_data = json.loads(
+                    temporary_json.read_text(
+                        encoding="utf-8"
+                    )
+                )
+            except (
+                OSError,
+                json.JSONDecodeError,
+            ) as exc:
+                return {
+                    "ok": False,
+                    "state": "history_validation_failed",
+                    "message": (
+                        "Generated Historical Trend JSON "
+                        "is invalid: "
+                        + str(exc)
+                    ),
+                }, 500
+
+            required_sections = {
+                "current_scan",
+                "comparison",
+                "statistics",
+                "executive_summary",
+            }
+
+            if (
+                not isinstance(
+                    report_data,
+                    dict,
+                )
+                or not required_sections.issubset(
+                    report_data
+                )
+                or report_data.get("state")
+                    != "completed"
+                or report_data.get(
+                    "history_version"
+                )
+                    != "baseline-aware-v2"
+                or report_data.get(
+                    "source_report_sha256"
+                )
+                    != source_fingerprint
+            ):
+                return {
+                    "ok": False,
+                    "state": "history_validation_failed",
+                    "message": (
+                        "Generated Historical Trend report "
+                        "failed current-version validation."
+                    ),
+                }, 500
+
+            try:
+                text_content = (
+                    temporary_text.read_text(
+                        encoding="utf-8"
+                    ).strip()
+                )
+            except OSError as exc:
+                return {
+                    "ok": False,
+                    "state": "history_validation_failed",
+                    "message": (
+                        "Generated Historical Trend text "
+                        "report could not be read: "
+                        + str(exc)
+                    ),
+                }, 500
+
+            if not text_content:
+                return {
+                    "ok": False,
+                    "state": "history_validation_failed",
+                    "message": (
+                        "Generated Historical Trend text "
+                        "report is empty."
+                    ),
+                }, 500
+
+            try:
+                with sqlite3.connect(
+                    temporary_database
+                ) as connection:
+                    tables = {
+                        row[0]
+                        for row in connection.execute(
+                            """
+                            SELECT name
+                            FROM sqlite_master
+                            WHERE type = 'table'
+                            """
+                        ).fetchall()
+                    }
+
+                    required_tables = {
+                        "scan_history",
+                        "scan_summary",
+                        "history_metadata",
+                    }
+
+                    if not required_tables.issubset(
+                        tables
+                    ):
+                        return {
+                            "ok": False,
+                            "state":
+                                "history_validation_failed",
+                            "message": (
+                                "Generated history database "
+                                "is missing required tables."
+                            ),
+                        }, 500
+
+                    version_row = connection.execute(
+                        """
+                        SELECT value
+                        FROM history_metadata
+                        WHERE key = 'analysis_version'
+                        """
+                    ).fetchone()
+
+                    fingerprint_row = (
+                        connection.execute(
+                            """
+                            SELECT value
+                            FROM history_metadata
+                            WHERE key =
+                                'last_source_sha256'
+                            """
+                        ).fetchone()
+                    )
+
+                    scan_count = connection.execute(
+                        """
+                        SELECT COUNT(
+                            DISTINCT scan_id
+                        )
+                        FROM scan_history
+                        """
+                    ).fetchone()[0]
+
+            except sqlite3.Error as exc:
+                return {
+                    "ok": False,
+                    "state": "history_validation_failed",
+                    "message": (
+                        "Generated history database could "
+                        "not be validated: "
+                        + str(exc)
+                    ),
+                }, 500
+
+            if (
+                not version_row
+                or version_row[0]
+                    != "baseline-aware-v2"
+                or not fingerprint_row
+                or fingerprint_row[0]
+                    != source_fingerprint
+                or scan_count < 1
+            ):
+                return {
+                    "ok": False,
+                    "state": "history_validation_failed",
+                    "message": (
+                        "Generated history database failed "
+                        "version or source verification."
+                    ),
+                }, 500
+
+            # Verify Threat Analysis did not change while
+            # Historical Trends was being generated.
+            try:
+                current_report_mtime = (
+                    SECURITY_REPORT_CSV.stat().st_mtime_ns
+                )
+            except OSError as exc:
+                return {
+                    "ok": False,
+                    "state": "report_changed",
+                    "message": (
+                        "Threat report became unavailable "
+                        "during Historical Trend generation: "
+                        + str(exc)
+                    ),
+                }, 409
+
+            current_fingerprint = (
+                _calculate_file_sha256(
+                    SECURITY_REPORT_CSV
+                )
+            )
+
+            if (
+                current_report_mtime
+                    != source_report_mtime
+                or current_fingerprint
+                    != source_fingerprint
+            ):
+                return {
+                    "ok": False,
+                    "state": "report_changed",
+                    "message": (
+                        "Threat Analysis changed while "
+                        "Historical Trends was running. "
+                        "Generate history again."
+                    ),
+                }, 409
+
+            final_threat_status = (
+                get_threat_report_status()
+            )
+
+            if (
+                final_threat_status["status"]
+                != "current"
+            ):
+                return {
+                    "ok": False,
+                    "state": "threat_analysis_changed",
+                    "message":
+                        final_threat_status[
+                            "message"
+                        ],
+                    "report_status":
+                        final_threat_status[
+                            "status"
+                        ],
+                    "stale_sources":
+                        final_threat_status[
+                            "stale_sources"
+                        ],
+                }, 409
+
+            targets = [
+                (
+                    temporary_database,
+                    HISTORY_DB,
+                    temp_directory
+                    / "previous_history.db",
+                ),
+                (
+                    temporary_text,
+                    HISTORICAL_TREND_TEXT,
+                    temp_directory
+                    / "previous_historical_trend_report.txt",
+                ),
+                (
+                    temporary_json,
+                    HISTORICAL_TREND_JSON,
+                    temp_directory
+                    / "previous_historical_trend_report.json",
+                ),
+            ]
+
+            previous_states = []
+
+            for (
+                _temporary,
+                target,
+                backup,
+            ) in targets:
+                existed = target.exists()
+
+                previous_states.append(
+                    (
+                        target,
+                        backup,
+                        existed,
+                    )
+                )
+
+                if existed:
+                    shutil.copy2(
+                        target,
+                        backup,
+                    )
+
+            try:
+                for (
+                    temporary,
+                    target,
+                    _backup,
+                ) in targets:
+                    temporary.replace(
+                        target
+                    )
+
+            except OSError:
+                # Restore all active files if any one of
+                # the three replacements fails.
+                for (
+                    target,
+                    backup,
+                    existed,
+                ) in previous_states:
+                    if (
+                        existed
+                        and backup.exists()
+                    ):
+                        shutil.copy2(
+                            backup,
+                            target,
+                        )
+                    elif not existed:
+                        target.unlink(
+                            missing_ok=True
+                        )
+
+                raise
+
+    except subprocess.TimeoutExpired:
+        return {
+            "ok": False,
+            "state": "history_timeout",
+            "message": (
+                "Historical Trend generation timed out."
+            ),
+        }, 500
+
+    except OSError as exc:
+        return {
+            "ok": False,
+            "state": "history_error",
+            "message": str(exc),
+        }, 500
+
+    history = read_history()
+
+    return {
+        "ok": True,
+        "state": "completed",
+        "message": (
+            "Historical Trends updated successfully."
+        ),
+        "history_status":
+            history.get("history_status"),
+        "scan_count":
+            history.get("scan_count"),
+        "latest":
+            history.get("latest"),
+        "source_report_sha256":
+            source_fingerprint,
+        "reports": [
+            HISTORY_DB.name,
+            HISTORICAL_TREND_TEXT.name,
+            HISTORICAL_TREND_JSON.name,
+        ],
+    }, 200
+
+
 def run_security_advisor() -> tuple[dict, int]:
     """Generate Security Advisor reports from current threat analysis."""
 
@@ -2816,6 +3810,22 @@ def download_report(filename):
 @app.get("/api/history")
 def history():
     return jsonify(read_history())
+
+
+@app.post("/api/history/archive-legacy")
+def archive_legacy_history_route():
+    response, status_code = (
+        archive_legacy_history()
+    )
+    return jsonify(response), status_code
+
+
+@app.post("/api/history/generate")
+def generate_historical_trends():
+    response, status_code = (
+        run_historical_trends()
+    )
+    return jsonify(response), status_code
 
 
 @app.get("/api/adapter/status")
