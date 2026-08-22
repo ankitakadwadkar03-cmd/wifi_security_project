@@ -61,6 +61,17 @@ LEGACY_HISTORY_DIRECTORY = (
     REPORTS_DIRECTORY
     / "legacy_history"
 )
+
+ALERT_NOTIFICATION_LOG = (
+    REPORTS_DIRECTORY
+    / "alert_notifications.log"
+)
+ALERT_NOTIFICATION_JSON = (
+    REPORTS_DIRECTORY
+    / "alert_notifications.json"
+)
+CURRENT_ALERT_NOTIFICATION_VERSION = "baseline-aware-v2"
+
 ALLOWED_REPORT_EXTENSIONS = {".csv", ".json", ".txt", ".log"}
 
 SYSTEMCTL_PATH = "/usr/bin/systemctl"
@@ -934,6 +945,191 @@ def get_security_advisor_status() -> dict:
     }
 
 
+def get_alert_notification_status() -> dict:
+    """Check compatibility and freshness of saved Module 9 outputs."""
+
+    alert_files = [
+        ALERT_NOTIFICATION_LOG,
+        ALERT_NOTIFICATION_JSON,
+    ]
+
+    existing_files = [
+        alert_path
+        for alert_path in alert_files
+        if alert_path.exists()
+    ]
+
+    threat_status = get_threat_report_status()
+
+    if not existing_files:
+        return {
+            "status": "missing",
+            "generation_required": True,
+            "threat_analysis_required": (
+                threat_status["analysis_required"]
+            ),
+            "analysis_version": None,
+            "current_version":
+                CURRENT_ALERT_NOTIFICATION_VERSION,
+            "migration_required": False,
+            "message": (
+                "No current Alert Notification reports exist yet. "
+                "Generate alerts after completing current "
+                "Threat Analysis."
+            ),
+        }
+
+    if len(existing_files) != len(alert_files):
+        return {
+            "status": "incomplete",
+            "generation_required": True,
+            "threat_analysis_required": (
+                threat_status["analysis_required"]
+            ),
+            "analysis_version": None,
+            "current_version":
+                CURRENT_ALERT_NOTIFICATION_VERSION,
+            "migration_required": True,
+            "message": (
+                "Alert Notification output files are incomplete. "
+                "They are not treated as current Module 9 results."
+            ),
+        }
+
+    try:
+        payload = json.loads(
+            ALERT_NOTIFICATION_JSON.read_text(
+                encoding="utf-8"
+            )
+        )
+    except (
+        OSError,
+        json.JSONDecodeError,
+    ) as exc:
+        return {
+            "status": "unavailable",
+            "generation_required": True,
+            "threat_analysis_required": (
+                threat_status["analysis_required"]
+            ),
+            "analysis_version": None,
+            "current_version":
+                CURRENT_ALERT_NOTIFICATION_VERSION,
+            "migration_required": True,
+            "message": (
+                "Alert Notification JSON could not be "
+                "validated: "
+                + str(exc)
+            ),
+        }
+
+    stored_version = str(
+        payload.get(
+            "analysis_version",
+            "",
+        )
+    ).strip()
+
+    stored_fingerprint = str(
+        payload.get(
+            "source_report_sha256",
+            "",
+        )
+    ).strip()
+
+    if (
+        stored_version
+        != CURRENT_ALERT_NOTIFICATION_VERSION
+        or not stored_fingerprint
+    ):
+        return {
+            "status": "legacy",
+            "generation_required": True,
+            "threat_analysis_required": (
+                threat_status["analysis_required"]
+            ),
+            "analysis_version": (
+                stored_version
+                or "legacy-pre-baseline"
+            ),
+            "current_version":
+                CURRENT_ALERT_NOTIFICATION_VERSION,
+            "migration_required": True,
+            "message": (
+                "Saved Alert Notification files were created "
+                "before the current baseline-aware threat logic "
+                "and are not treated as current Module 9 alerts."
+            ),
+        }
+
+    if threat_status["status"] != "current":
+        return {
+            "status": "stale",
+            "generation_required": True,
+            "threat_analysis_required": True,
+            "analysis_version": stored_version,
+            "current_version":
+                CURRENT_ALERT_NOTIFICATION_VERSION,
+            "migration_required": False,
+            "message": (
+                "Saved Alert Notifications cannot be treated "
+                "as current because Threat Analysis is not "
+                "current. "
+                + threat_status["message"]
+            ),
+        }
+
+    source_fingerprint = _calculate_file_sha256(
+        SECURITY_REPORT_CSV
+    )
+
+    if source_fingerprint is None:
+        return {
+            "status": "unavailable",
+            "generation_required": True,
+            "threat_analysis_required": False,
+            "analysis_version": stored_version,
+            "current_version":
+                CURRENT_ALERT_NOTIFICATION_VERSION,
+            "migration_required": False,
+            "message": (
+                "Current Threat Analysis could not be "
+                "fingerprinted for Alert Notification "
+                "freshness verification."
+            ),
+        }
+
+    if stored_fingerprint != source_fingerprint:
+        return {
+            "status": "stale",
+            "generation_required": True,
+            "threat_analysis_required": False,
+            "analysis_version": stored_version,
+            "current_version":
+                CURRENT_ALERT_NOTIFICATION_VERSION,
+            "migration_required": False,
+            "message": (
+                "Saved Alert Notifications belong to an older "
+                "Threat Analysis report. Generate Module 9 "
+                "again for the current findings."
+            ),
+        }
+
+    return {
+        "status": "current",
+        "generation_required": False,
+        "threat_analysis_required": False,
+        "analysis_version": stored_version,
+        "current_version":
+            CURRENT_ALERT_NOTIFICATION_VERSION,
+        "migration_required": False,
+        "message": (
+            "Alert Notification reports match the current "
+            "Threat Analysis."
+        ),
+    }
+
+
 def _format_file_size(size_bytes: int) -> str:
     """Convert bytes into a readable file-size label."""
     if size_bytes < 1024:
@@ -1021,10 +1217,16 @@ def read_reports() -> list[dict]:
 
     report_rows: list[dict] = []
     advisor_status = get_security_advisor_status()
+    alert_status = get_alert_notification_status()
 
     advisor_filenames = {
         SECURITY_ADVISOR_TEXT.name,
         SECURITY_ADVISOR_JSON.name,
+    }
+
+    alert_filenames = {
+        ALERT_NOTIFICATION_LOG.name,
+        ALERT_NOTIFICATION_JSON.name,
     }
 
     for report_path in REPORTS_DIRECTORY.iterdir():
@@ -1070,6 +1272,26 @@ def read_reports() -> list[dict]:
                         ]
                     ),
                     "freshness_message": advisor_status[
+                        "message"
+                    ],
+                }
+            )
+
+        if report_path.name in alert_filenames:
+            report_row.update(
+                {
+                    "freshness_status": alert_status[
+                        "status"
+                    ],
+                    "generation_required": alert_status[
+                        "generation_required"
+                    ],
+                    "threat_analysis_required": (
+                        alert_status[
+                            "threat_analysis_required"
+                        ]
+                    ),
+                    "freshness_message": alert_status[
                         "message"
                     ],
                 }
@@ -3645,6 +3867,392 @@ def run_security_advisor() -> tuple[dict, int]:
     }, 200
 
 
+def run_alert_notifications() -> tuple[dict, int]:
+    """Safely generate Module 9 alerts from current Threat Analysis."""
+
+    threat_status = get_threat_report_status()
+
+    if threat_status["status"] != "current":
+        return {
+            "ok": False,
+            "state": "threat_analysis_required",
+            "message": threat_status["message"],
+            "report_status": threat_status["status"],
+            "analysis_required": True,
+            "stale_sources": threat_status[
+                "stale_sources"
+            ],
+        }, 409
+
+    alert_status = get_alert_notification_status()
+
+    if alert_status["status"] == "legacy":
+        return {
+            "ok": False,
+            "state": "legacy_alerts_detected",
+            "message": (
+                "Legacy Alert Notification files must be "
+                "preserved separately before current "
+                "baseline-aware alerts are generated."
+            ),
+            "alert_status": "legacy",
+            "migration_required": True,
+        }, 409
+
+    if alert_status["status"] in {
+        "incomplete",
+        "unavailable",
+    }:
+        return {
+            "ok": False,
+            "state": "alert_outputs_unavailable",
+            "message": alert_status["message"],
+            "alert_status": alert_status["status"],
+            "migration_required": alert_status[
+                "migration_required"
+            ],
+        }, 409
+
+    try:
+        source_report_mtime = (
+            SECURITY_REPORT_CSV.stat().st_mtime_ns
+        )
+    except OSError as exc:
+        return {
+            "ok": False,
+            "state": "report_unavailable",
+            "message": (
+                "Threat report could not be accessed: "
+                + str(exc)
+            ),
+        }, 500
+
+    source_fingerprint = _calculate_file_sha256(
+        SECURITY_REPORT_CSV
+    )
+
+    if source_fingerprint is None:
+        return {
+            "ok": False,
+            "state": "report_unavailable",
+            "message": (
+                "Threat report could not be fingerprinted "
+                "for Alert Notification generation."
+            ),
+        }, 500
+
+    if alert_status["status"] == "current":
+        return {
+            "ok": True,
+            "state": "already_recorded",
+            "message": (
+                "This exact Threat Analysis has already "
+                "been processed by Alert Notifications. "
+                "No duplicate alerts were written."
+            ),
+            "source_report_sha256":
+                source_fingerprint,
+            "alert_status": "current",
+        }, 200
+
+    REPORTS_DIRECTORY.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix="netshield-alerts-",
+            dir=REPORTS_DIRECTORY,
+        ) as temp_directory:
+            temp_directory = Path(
+                temp_directory
+            )
+
+            temporary_log = (
+                temp_directory
+                / ALERT_NOTIFICATION_LOG.name
+            )
+
+            temporary_json = (
+                temp_directory
+                / ALERT_NOTIFICATION_JSON.name
+            )
+
+            # Preserve valid current-version alert history
+            # when processing a newer Threat Analysis.
+            if (
+                alert_status["status"] == "stale"
+                and ALERT_NOTIFICATION_LOG.exists()
+            ):
+                shutil.copy2(
+                    ALERT_NOTIFICATION_LOG,
+                    temporary_log,
+                )
+
+            module_9 = subprocess.run(
+                [
+                    sys.executable,
+                    str(
+                        PROJECT_ROOT
+                        / "alert_notification"
+                        / "alert_notification_system.py"
+                    ),
+                    "--report-csv",
+                    str(SECURITY_REPORT_CSV),
+                    "--log-path",
+                    str(temporary_log),
+                    "--json-path",
+                    str(temporary_json),
+                    "--no-color",
+                ],
+                cwd=PROJECT_ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+            if module_9.returncode != 0:
+                return {
+                    "ok": False,
+                    "state": "alert_generation_failed",
+                    "message": (
+                        module_9.stderr.strip()
+                        or module_9.stdout.strip()
+                        or (
+                            "Alert Notification generation "
+                            "failed."
+                        )
+                    ),
+                }, 500
+
+            # A valid zero-alert run may not write any log
+            # lines, but Module 9 still exposes a log file.
+            temporary_log.touch(
+                exist_ok=True
+            )
+
+            if not temporary_json.exists():
+                return {
+                    "ok": False,
+                    "state": "alert_output_missing",
+                    "message": (
+                        "Alert Notification generation did "
+                        "not produce its JSON output."
+                    ),
+                }, 500
+
+            try:
+                alert_data = json.loads(
+                    temporary_json.read_text(
+                        encoding="utf-8"
+                    )
+                )
+            except (
+                OSError,
+                json.JSONDecodeError,
+            ) as exc:
+                return {
+                    "ok": False,
+                    "state": "alert_validation_failed",
+                    "message": (
+                        "Generated Alert Notification JSON "
+                        "is invalid: "
+                        + str(exc)
+                    ),
+                }, 500
+
+            if (
+                not isinstance(alert_data, dict)
+                or alert_data.get("state")
+                    != "completed"
+                or alert_data.get("analysis_version")
+                    != CURRENT_ALERT_NOTIFICATION_VERSION
+                or alert_data.get(
+                    "source_report_sha256"
+                ) != source_fingerprint
+                or not isinstance(
+                    alert_data.get("summary"),
+                    dict,
+                )
+                or not isinstance(
+                    alert_data.get("alerts"),
+                    list,
+                )
+            ):
+                return {
+                    "ok": False,
+                    "state": "alert_validation_failed",
+                    "message": (
+                        "Generated Alert Notification output "
+                        "failed version, fingerprint, or "
+                        "structure validation."
+                    ),
+                }, 500
+
+            # Ensure Threat Analysis did not change while
+            # Module 9 was generating alerts.
+            current_report_fingerprint = (
+                _calculate_file_sha256(
+                    SECURITY_REPORT_CSV
+                )
+            )
+
+            try:
+                current_report_mtime = (
+                    SECURITY_REPORT_CSV.stat().st_mtime_ns
+                )
+            except OSError as exc:
+                return {
+                    "ok": False,
+                    "state": "report_changed",
+                    "message": (
+                        "Threat report became unavailable "
+                        "during alert generation: "
+                        + str(exc)
+                    ),
+                }, 409
+
+            if (
+                current_report_mtime
+                    != source_report_mtime
+                or current_report_fingerprint
+                    != source_fingerprint
+            ):
+                return {
+                    "ok": False,
+                    "state": "report_changed",
+                    "message": (
+                        "Threat Analysis changed while "
+                        "Alert Notifications were being "
+                        "generated. Run Module 9 again."
+                    ),
+                }, 409
+
+            final_threat_status = (
+                get_threat_report_status()
+            )
+
+            if final_threat_status["status"] != "current":
+                return {
+                    "ok": False,
+                    "state": "threat_analysis_required",
+                    "message": final_threat_status[
+                        "message"
+                    ],
+                    "analysis_required": True,
+                }, 409
+
+            targets = [
+                (
+                    temporary_log,
+                    ALERT_NOTIFICATION_LOG,
+                ),
+                (
+                    temporary_json,
+                    ALERT_NOTIFICATION_JSON,
+                ),
+            ]
+
+            backups = []
+
+            try:
+                for _, destination in targets:
+                    if destination.exists():
+                        backup = (
+                            temp_directory
+                            / (
+                                destination.name
+                                + ".backup"
+                            )
+                        )
+
+                        shutil.copy2(
+                            destination,
+                            backup,
+                        )
+
+                        backups.append(
+                            (
+                                destination,
+                                backup,
+                            )
+                        )
+
+                replaced = []
+
+                for source, destination in targets:
+                    source.replace(destination)
+                    replaced.append(destination)
+
+            except OSError as exc:
+                for destination in replaced:
+                    try:
+                        destination.unlink(
+                            missing_ok=True
+                        )
+                    except OSError:
+                        pass
+
+                for destination, backup in backups:
+                    if backup.exists():
+                        shutil.copy2(
+                            backup,
+                            destination,
+                        )
+
+                return {
+                    "ok": False,
+                    "state": "alert_save_failed",
+                    "message": (
+                        "Alert Notification outputs could "
+                        "not be saved atomically: "
+                        + str(exc)
+                    ),
+                }, 500
+
+    except subprocess.TimeoutExpired:
+        return {
+            "ok": False,
+            "state": "alert_timeout",
+            "message": (
+                "Alert Notification generation timed out."
+            ),
+        }, 500
+
+    except OSError as exc:
+        return {
+            "ok": False,
+            "state": "alert_error",
+            "message": str(exc),
+        }, 500
+
+    final_status = get_alert_notification_status()
+
+    return {
+        "ok": True,
+        "state": "completed",
+        "message": (
+            "Alert Notifications generated successfully."
+        ),
+        "alert_status": final_status["status"],
+        "source_report_sha256":
+            source_fingerprint,
+        "alert_count": alert_data[
+            "summary"
+        ].get(
+            "total_alerts",
+            len(alert_data["alerts"]),
+        ),
+        "summary": alert_data["summary"],
+        "reports": [
+            ALERT_NOTIFICATION_LOG.name,
+            ALERT_NOTIFICATION_JSON.name,
+        ],
+    }, 200
+
+
 @app.post("/api/security-advisor/generate")
 def generate_security_advisor():
     response, status_code = (
@@ -3656,6 +4264,14 @@ def generate_security_advisor():
 @app.post("/api/threats/analyze")
 def analyze_threats():
     response, status_code = run_threat_analysis()
+    return jsonify(response), status_code
+
+
+@app.post("/api/alerts/generate")
+def generate_alert_notifications():
+    response, status_code = (
+        run_alert_notifications()
+    )
     return jsonify(response), status_code
 
 
