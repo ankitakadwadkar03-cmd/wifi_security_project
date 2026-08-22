@@ -22,6 +22,7 @@ function formatStatus(value) {
 export default function ReportsPage() {
   const [reports, setReports] = useState([]);
   const [advisorStatus, setAdvisorStatus] = useState(null);
+  const [alertStatus, setAlertStatus] = useState(null);
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -29,6 +30,10 @@ export default function ReportsPage() {
   const [advisorLoading, setAdvisorLoading] = useState(false);
   const [advisorMessage, setAdvisorMessage] = useState("");
   const [advisorError, setAdvisorError] = useState("");
+
+  const [alertLoading, setAlertLoading] = useState(false);
+  const [alertMessage, setAlertMessage] = useState("");
+  const [alertError, setAlertError] = useState("");
 
   async function loadReports(signal) {
     try {
@@ -54,6 +59,10 @@ export default function ReportsPage() {
 
       setAdvisorStatus(
         data.security_advisor || null
+      );
+
+      setAlertStatus(
+        data.alert_notifications || null
       );
     } catch (fetchError) {
       if (fetchError.name !== "AbortError") {
@@ -140,6 +149,130 @@ export default function ReportsPage() {
     }
   }
 
+  async function archiveLegacyAlerts() {
+    if (
+      alertLoading ||
+      !alertStatus?.archive_legacy_url
+    ) {
+      return;
+    }
+
+    try {
+      setAlertLoading(true);
+      setAlertMessage("");
+      setAlertError("");
+
+      const response = await fetch(
+        `${API_BASE_URL}${alertStatus.archive_legacy_url}`,
+        {
+          method: "POST",
+        }
+      );
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          data.message ||
+            `Alert archive returned HTTP ${response.status}`
+        );
+      }
+
+      setAlertMessage(
+        `${data.message} Archived: ${
+          Array.isArray(data.archived_files)
+            ? data.archived_files.join(", ")
+            : "legacy alert files"
+        }.`
+      );
+
+      await loadReports();
+    } catch (archiveError) {
+      console.error(
+        "Legacy Alert Notification archive failed:",
+        archiveError
+      );
+
+      setAlertError(
+        archiveError.message ||
+          "Legacy Alert Notification files could not be archived."
+      );
+
+      await loadReports();
+    } finally {
+      setAlertLoading(false);
+    }
+  }
+
+  async function generateAlertNotifications() {
+    if (
+      alertLoading ||
+      !alertStatus?.generate_url ||
+      alertStatus?.threat_analysis_required ||
+      alertStatus?.migration_required
+    ) {
+      return;
+    }
+
+    try {
+      setAlertLoading(true);
+      setAlertMessage("");
+      setAlertError("");
+
+      const response = await fetch(
+        `${API_BASE_URL}${alertStatus.generate_url}`,
+        {
+          method: "POST",
+        }
+      );
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          data.message ||
+            `Alert Notification generation returned HTTP ${response.status}`
+        );
+      }
+
+      const summary = data.summary || {};
+
+      setAlertMessage(
+        data.state === "already_recorded"
+          ? data.message
+          : `${data.message} ${
+              data.alert_count ?? 0
+            } alert(s) generated: ${
+              summary.critical_alerts ?? 0
+            } critical, ${
+              summary.high_alerts ?? 0
+            } high, ${
+              summary.medium_alerts ?? 0
+            } medium, ${
+              summary.low_alerts ?? 0
+            } low, ${
+              summary.information_alerts ?? 0
+            } informational.`
+      );
+
+      await loadReports();
+    } catch (generationError) {
+      console.error(
+        "Alert Notification generation failed:",
+        generationError
+      );
+
+      setAlertError(
+        generationError.message ||
+          "Alert Notifications could not be generated."
+      );
+
+      await loadReports();
+    } finally {
+      setAlertLoading(false);
+    }
+  }
+
   function viewReport(report) {
     window.open(
       `${API_BASE_URL}${report.view_url}`,
@@ -151,6 +284,18 @@ export default function ReportsPage() {
   const advisorBlocked =
     Boolean(
       advisorStatus?.threat_analysis_required
+    );
+
+  const legacyAlerts =
+    alertStatus?.status === "legacy" &&
+    alertStatus?.migration_required;
+
+  const alertGenerationBlocked =
+    Boolean(
+      alertStatus?.threat_analysis_required ||
+      alertStatus?.migration_required ||
+      alertStatus?.status === "incomplete" ||
+      alertStatus?.status === "unavailable"
     );
 
   return (
@@ -235,6 +380,125 @@ export default function ReportsPage() {
               )}
           </div>
         </div>
+      )}
+
+      {!loading && !error && alertStatus && (
+        <div className="advisorGenerationPanel">
+          <div className="advisorGenerationContent">
+            <div>
+              <span className="advisorGenerationLabel">
+                Module 9
+              </span>
+
+              <h2>Alert Notifications</h2>
+
+              <p>
+                Convert the current Threat Analysis findings into
+                severity-based security notifications while keeping
+                live packet-alert evidence separate.
+              </p>
+            </div>
+
+            <div className="advisorGenerationStatus">
+              <StatusBadge
+                value={formatStatus(
+                  alertStatus.status
+                )}
+              />
+
+              <span>
+                {alertStatus.message}
+              </span>
+            </div>
+          </div>
+
+          <div className="advisorGenerationActions">
+            {legacyAlerts ? (
+              <>
+                <button
+                  type="button"
+                  className="primaryButton"
+                  onClick={archiveLegacyAlerts}
+                  disabled={
+                    alertLoading ||
+                    !alertStatus.archive_legacy_url
+                  }
+                >
+                  {alertLoading
+                    ? "Archiving..."
+                    : "Archive Legacy Alerts"}
+                </button>
+
+                <p>
+                  Preserve the old Module 9 alert files before
+                  generating baseline-aware Alert Notifications.
+                </p>
+              </>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  className="primaryButton"
+                  onClick={generateAlertNotifications}
+                  disabled={
+                    alertLoading ||
+                    alertGenerationBlocked
+                  }
+                >
+                  {alertLoading
+                    ? "Generating..."
+                    : alertStatus.status === "current"
+                      ? "Update Alert Notifications"
+                      : "Generate Alert Notifications"}
+                </button>
+
+                {alertStatus.threat_analysis_required && (
+                  <p>
+                    Run fresh Threat Analysis in the Threat Center
+                    before generating Alert Notifications.
+                  </p>
+                )}
+
+                {!alertStatus.threat_analysis_required &&
+                  alertStatus.generation_required &&
+                  !alertStatus.migration_required && (
+                    <p>
+                      Alert Notification generation is available for
+                      the current Threat Analysis report.
+                    </p>
+                  )}
+
+                {!alertStatus.generation_required &&
+                  alertStatus.status === "current" && (
+                    <p>
+                      Alert Notifications match the current Threat
+                      Analysis. Re-running will not duplicate alerts.
+                    </p>
+                  )}
+
+                {alertStatus.migration_required &&
+                  !legacyAlerts && (
+                    <p>
+                      Saved Module 9 outputs require review before
+                      new alerts can be generated.
+                    </p>
+                  )}
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {alertMessage && (
+        <p className="scannerActionMessage">
+          {alertMessage}
+        </p>
+      )}
+
+      {alertError && (
+        <p className="scannerActionMessage errorMessage">
+          {alertError}
+        </p>
       )}
 
       {advisorMessage && (

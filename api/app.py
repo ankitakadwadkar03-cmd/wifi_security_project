@@ -4495,6 +4495,7 @@ def threats():
 def reports():
     report_rows = read_reports()
     advisor_status = get_security_advisor_status()
+    alert_status = get_alert_notification_status()
 
     return jsonify(
         {
@@ -4511,6 +4512,30 @@ def reports():
                 "message": advisor_status["message"],
                 "generate_url": (
                     "/api/security-advisor/generate"
+                ),
+            },
+            "alert_notifications": {
+                "status": alert_status["status"],
+                "generation_required": alert_status[
+                    "generation_required"
+                ],
+                "threat_analysis_required": alert_status[
+                    "threat_analysis_required"
+                ],
+                "migration_required": alert_status.get(
+                    "migration_required",
+                    False,
+                ),
+                "analysis_version": alert_status.get(
+                    "analysis_version"
+                ),
+                "current_version": alert_status.get(
+                    "current_version"
+                ),
+                "message": alert_status["message"],
+                "generate_url": "/api/alerts/generate",
+                "archive_legacy_url": alert_status.get(
+                    "archive_legacy_url"
                 ),
             },
         }
