@@ -5991,6 +5991,9 @@ def reports():
     trusted_baseline_status = (
         get_trusted_baseline_report_status()
     )
+    pre_connect_status = (
+        get_pre_connect_safety_status()
+    )
 
     return jsonify(
         {
@@ -6022,6 +6025,40 @@ def reports():
                     "/api/trusted-baseline/generate",
                 "archive_legacy_url":
                     trusted_baseline_status.get(
+                        "archive_legacy_url"
+                    ),
+            },
+            "pre_connect_safety": {
+                "status":
+                    pre_connect_status["status"],
+                "generation_required":
+                    pre_connect_status[
+                        "generation_required"
+                    ],
+                "trusted_baseline_required":
+                    pre_connect_status.get(
+                        "trusted_baseline_required",
+                        False,
+                    ),
+                "migration_required":
+                    pre_connect_status.get(
+                        "migration_required",
+                        False,
+                    ),
+                "analysis_version":
+                    pre_connect_status.get(
+                        "analysis_version"
+                    ),
+                "current_version":
+                    pre_connect_status.get(
+                        "current_version"
+                    ),
+                "message":
+                    pre_connect_status["message"],
+                "generate_url":
+                    "/api/pre-connect/generate",
+                "archive_legacy_url":
+                    pre_connect_status.get(
                         "archive_legacy_url"
                     ),
             },

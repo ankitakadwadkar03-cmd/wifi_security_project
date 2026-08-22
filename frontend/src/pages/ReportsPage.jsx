@@ -23,6 +23,8 @@ export default function ReportsPage() {
   const [reports, setReports] = useState([]);
   const [trustedBaselineStatus, setTrustedBaselineStatus] =
     useState(null);
+  const [preConnectStatus, setPreConnectStatus] =
+    useState(null);
   const [advisorStatus, setAdvisorStatus] = useState(null);
   const [alertStatus, setAlertStatus] = useState(null);
 
@@ -34,6 +36,13 @@ export default function ReportsPage() {
   const [trustedBaselineMessage, setTrustedBaselineMessage] =
     useState("");
   const [trustedBaselineError, setTrustedBaselineError] =
+    useState("");
+
+  const [preConnectLoading, setPreConnectLoading] =
+    useState(false);
+  const [preConnectMessage, setPreConnectMessage] =
+    useState("");
+  const [preConnectError, setPreConnectError] =
     useState("");
 
   const [advisorLoading, setAdvisorLoading] = useState(false);
@@ -68,6 +77,10 @@ export default function ReportsPage() {
 
       setTrustedBaselineStatus(
         data.trusted_baseline || null
+      );
+
+      setPreConnectStatus(
+        data.pre_connect_safety || null
       );
 
       setAdvisorStatus(
@@ -222,6 +235,126 @@ export default function ReportsPage() {
       await loadReports();
     } finally {
       setTrustedBaselineLoading(false);
+    }
+  }
+
+  async function archiveLegacyPreConnect() {
+    if (
+      preConnectLoading ||
+      !preConnectStatus?.archive_legacy_url
+    ) {
+      return;
+    }
+
+    try {
+      setPreConnectLoading(true);
+      setPreConnectMessage("");
+      setPreConnectError("");
+
+      const response = await fetch(
+        `${API_BASE_URL}${preConnectStatus.archive_legacy_url}`,
+        {
+          method: "POST",
+        }
+      );
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          data.message ||
+            `Pre-Connect archive returned HTTP ${response.status}`
+        );
+      }
+
+      setPreConnectMessage(
+        `${data.message} Archived: ${
+          Array.isArray(data.archived_files)
+            ? data.archived_files.join(", ")
+            : "legacy Pre-Connect reports"
+        }.`
+      );
+
+      await loadReports();
+    } catch (archiveError) {
+      console.error(
+        "Pre-Connect archive failed:",
+        archiveError
+      );
+
+      setPreConnectError(
+        archiveError.message ||
+          "Legacy Pre-Connect reports could not be archived."
+      );
+
+      await loadReports();
+    } finally {
+      setPreConnectLoading(false);
+    }
+  }
+
+  async function generatePreConnectSafety() {
+    if (
+      preConnectLoading ||
+      !preConnectStatus?.generate_url ||
+      preConnectStatus?.migration_required ||
+      preConnectStatus?.trusted_baseline_required
+    ) {
+      return;
+    }
+
+    try {
+      setPreConnectLoading(true);
+      setPreConnectMessage("");
+      setPreConnectError("");
+
+      const response = await fetch(
+        `${API_BASE_URL}${preConnectStatus.generate_url}`,
+        {
+          method: "POST",
+        }
+      );
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          data.message ||
+            `Pre-Connect generation returned HTTP ${response.status}`
+        );
+      }
+
+      const summary = data.summary || {};
+
+      setPreConnectMessage(
+        data.state === "already_current"
+          ? data.message
+          : `${data.message} ${
+              data.network_count ?? 0
+            } network(s) reviewed: ${
+              summary.safe_to_connect ?? 0
+            } safe, ${
+              summary.use_with_caution ?? 0
+            } caution, ${
+              summary.avoid_this_network ?? 0
+            } avoid.`
+      );
+
+      await loadReports();
+    } catch (generationError) {
+      console.error(
+        "Pre-Connect generation failed:",
+        generationError
+      );
+
+      setPreConnectError(
+        generationError.message ||
+          "Pre-Connect Safety reports could not be generated."
+      );
+
+      await loadReports();
+    } finally {
+      setPreConnectLoading(false);
     }
   }
 
@@ -426,6 +559,18 @@ export default function ReportsPage() {
       trustedBaselineStatus?.status === "unavailable"
     );
 
+  const legacyPreConnect =
+    preConnectStatus?.status === "legacy" &&
+    preConnectStatus?.migration_required;
+
+  const preConnectGenerationBlocked =
+    Boolean(
+      preConnectStatus?.migration_required ||
+      preConnectStatus?.trusted_baseline_required ||
+      preConnectStatus?.status === "incomplete" ||
+      preConnectStatus?.status === "unavailable"
+    );
+
   const advisorBlocked =
     Boolean(
       advisorStatus?.threat_analysis_required
@@ -565,6 +710,126 @@ export default function ReportsPage() {
       {trustedBaselineError && (
         <p className="scannerActionMessage errorMessage">
           {trustedBaselineError}
+        </p>
+      )}
+
+      {!loading && !error && preConnectStatus && (
+        <div className="advisorGenerationPanel">
+          <div className="advisorGenerationContent">
+            <div>
+              <span className="advisorGenerationLabel">
+                Pre-Connect Pipeline
+              </span>
+
+              <h2>Pre-Connect WiFi Safety Advisor</h2>
+
+              <p>
+                Convert the current Trusted Baseline findings into
+                simple connection guidance before a user joins a
+                WiFi network.
+              </p>
+            </div>
+
+            <div className="advisorGenerationStatus">
+              <StatusBadge
+                value={formatStatus(
+                  preConnectStatus.status
+                )}
+              />
+
+              <span>
+                {preConnectStatus.message}
+              </span>
+            </div>
+          </div>
+
+          <div className="advisorGenerationActions">
+            {legacyPreConnect ? (
+              <>
+                <button
+                  type="button"
+                  className="primaryButton"
+                  onClick={archiveLegacyPreConnect}
+                  disabled={
+                    preConnectLoading ||
+                    !preConnectStatus.archive_legacy_url
+                  }
+                >
+                  {preConnectLoading
+                    ? "Archiving..."
+                    : "Archive Legacy Pre-Connect Reports"}
+                </button>
+
+                <p>
+                  Preserve the older Pre-Connect Safety reports before
+                  generating results from the current Trusted Baseline.
+                </p>
+              </>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  className="primaryButton"
+                  onClick={generatePreConnectSafety}
+                  disabled={
+                    preConnectLoading ||
+                    preConnectGenerationBlocked
+                  }
+                >
+                  {preConnectLoading
+                    ? "Generating..."
+                    : preConnectStatus.status === "current"
+                      ? "Update Pre-Connect Safety"
+                      : "Generate Pre-Connect Safety"}
+                </button>
+
+                {preConnectStatus.trusted_baseline_required && (
+                  <p>
+                    Generate or update the Trusted Baseline report
+                    first. Pre-Connect Safety depends on that current
+                    baseline analysis.
+                  </p>
+                )}
+
+                {!preConnectStatus.trusted_baseline_required &&
+                  preConnectStatus.generation_required &&
+                  !preConnectStatus.migration_required && (
+                    <p>
+                      Pre-Connect Safety generation is available from
+                      the current Trusted Baseline report.
+                    </p>
+                  )}
+
+                {!preConnectStatus.generation_required &&
+                  preConnectStatus.status === "current" && (
+                    <p>
+                      Pre-Connect Safety matches the current Trusted
+                      Baseline report.
+                    </p>
+                  )}
+
+                {preConnectStatus.migration_required &&
+                  !legacyPreConnect && (
+                    <p>
+                      Saved Pre-Connect outputs require review before
+                      new reports can be generated.
+                    </p>
+                  )}
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {preConnectMessage && (
+        <p className="scannerActionMessage">
+          {preConnectMessage}
+        </p>
+      )}
+
+      {preConnectError && (
+        <p className="scannerActionMessage errorMessage">
+          {preConnectError}
         </p>
       )}
 
