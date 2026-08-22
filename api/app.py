@@ -5232,11 +5232,43 @@ def reports():
     report_rows = read_reports()
     advisor_status = get_security_advisor_status()
     alert_status = get_alert_notification_status()
+    trusted_baseline_status = (
+        get_trusted_baseline_report_status()
+    )
 
     return jsonify(
         {
             "count": len(report_rows),
             "reports": report_rows,
+            "trusted_baseline": {
+                "status":
+                    trusted_baseline_status["status"],
+                "generation_required":
+                    trusted_baseline_status[
+                        "generation_required"
+                    ],
+                "migration_required":
+                    trusted_baseline_status.get(
+                        "migration_required",
+                        False,
+                    ),
+                "analysis_version":
+                    trusted_baseline_status.get(
+                        "analysis_version"
+                    ),
+                "current_version":
+                    trusted_baseline_status.get(
+                        "current_version"
+                    ),
+                "message":
+                    trusted_baseline_status["message"],
+                "generate_url":
+                    "/api/trusted-baseline/generate",
+                "archive_legacy_url":
+                    trusted_baseline_status.get(
+                        "archive_legacy_url"
+                    ),
+            },
             "security_advisor": {
                 "status": advisor_status["status"],
                 "generation_required": advisor_status[
