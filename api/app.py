@@ -64,6 +64,18 @@ LEGACY_TRUSTED_BASELINE_DIRECTORY = (
     / "legacy_trusted_baseline"
 )
 
+PRE_CONNECT_REPORT_CSV = (
+    REPORTS_DIRECTORY
+    / "pre_connect_safety_report.csv"
+)
+
+PRE_CONNECT_REPORT_JSON = (
+    REPORTS_DIRECTORY
+    / "pre_connect_safety_report.json"
+)
+
+CURRENT_PRE_CONNECT_VERSION = "baseline-aware-v2"
+
 HISTORY_DB = PROJECT_ROOT / "security_reports" / "history.db"
 HISTORICAL_TREND_TEXT = (
     REPORTS_DIRECTORY
@@ -1534,6 +1546,201 @@ def run_trusted_baseline_generation() -> tuple[dict, int]:
     }, 200
 
 
+def get_pre_connect_safety_status() -> dict:
+    """Check whether Pre-Connect Safety reports match the current baseline."""
+
+    report_files = [
+        PRE_CONNECT_REPORT_CSV,
+        PRE_CONNECT_REPORT_JSON,
+    ]
+
+    existing_files = [
+        report
+        for report in report_files
+        if report.exists()
+    ]
+
+    if not existing_files:
+        baseline_status = (
+            get_trusted_baseline_report_status()
+        )
+
+        return {
+            "status": "missing",
+            "generation_required": True,
+            "trusted_baseline_required": (
+                baseline_status["status"]
+                != "current"
+            ),
+            "analysis_version": None,
+            "current_version":
+                CURRENT_PRE_CONNECT_VERSION,
+            "migration_required": False,
+            "message": (
+                "No current Pre-Connect Safety report "
+                "exists yet."
+            ),
+        }
+
+    if len(existing_files) != len(report_files):
+        return {
+            "status": "incomplete",
+            "generation_required": True,
+            "trusted_baseline_required": False,
+            "analysis_version": None,
+            "current_version":
+                CURRENT_PRE_CONNECT_VERSION,
+            "migration_required": True,
+            "message": (
+                "Pre-Connect Safety report files are "
+                "incomplete and cannot be treated as current."
+            ),
+        }
+
+    try:
+        payload = json.loads(
+            PRE_CONNECT_REPORT_JSON.read_text(
+                encoding="utf-8"
+            )
+        )
+    except (
+        OSError,
+        json.JSONDecodeError,
+    ) as exc:
+        return {
+            "status": "unavailable",
+            "generation_required": True,
+            "trusted_baseline_required": False,
+            "analysis_version": None,
+            "current_version":
+                CURRENT_PRE_CONNECT_VERSION,
+            "migration_required": True,
+            "message": (
+                "Pre-Connect Safety JSON could not be "
+                "validated: "
+                + str(exc)
+            ),
+        }
+
+    stored_version = str(
+        payload.get(
+            "analysis_version",
+            "",
+        )
+    ).strip()
+
+    stored_source_fingerprint = str(
+        payload.get(
+            "source_trusted_baseline_report_sha256",
+            "",
+        )
+    ).strip()
+
+    if (
+        stored_version
+            != CURRENT_PRE_CONNECT_VERSION
+        or not stored_source_fingerprint
+    ):
+        return {
+            "status": "legacy",
+            "generation_required": True,
+            "trusted_baseline_required": False,
+            "analysis_version": (
+                stored_version
+                or "legacy-pre-provenance"
+            ),
+            "current_version":
+                CURRENT_PRE_CONNECT_VERSION,
+            "migration_required": True,
+            "message": (
+                "Saved Pre-Connect Safety reports were "
+                "created before the current provenance-aware "
+                "format and are not treated as current."
+            ),
+        }
+
+    baseline_status = (
+        get_trusted_baseline_report_status()
+    )
+
+    if baseline_status["status"] != "current":
+        return {
+            "status": "stale",
+            "generation_required": True,
+            "trusted_baseline_required": True,
+            "analysis_version": stored_version,
+            "current_version":
+                CURRENT_PRE_CONNECT_VERSION,
+            "migration_required": False,
+            "stale_sources": [
+                "Trusted Baseline report"
+            ],
+            "message": (
+                "Pre-Connect Safety cannot be treated as "
+                "current because the Trusted Baseline report "
+                "must be updated first."
+            ),
+        }
+
+    current_source_fingerprint = (
+        _calculate_file_sha256(
+            TRUSTED_BASELINE_REPORT_CSV
+        )
+    )
+
+    if current_source_fingerprint is None:
+        return {
+            "status": "unavailable",
+            "generation_required": True,
+            "trusted_baseline_required": True,
+            "analysis_version": stored_version,
+            "current_version":
+                CURRENT_PRE_CONNECT_VERSION,
+            "migration_required": False,
+            "message": (
+                "Current Trusted Baseline CSV could not "
+                "be fingerprinted."
+            ),
+        }
+
+    if (
+        stored_source_fingerprint
+        != current_source_fingerprint
+    ):
+        return {
+            "status": "stale",
+            "generation_required": True,
+            "trusted_baseline_required": False,
+            "analysis_version": stored_version,
+            "current_version":
+                CURRENT_PRE_CONNECT_VERSION,
+            "migration_required": False,
+            "stale_sources": [
+                "Trusted Baseline report"
+            ],
+            "message": (
+                "Saved Pre-Connect Safety reports do not "
+                "match the current Trusted Baseline report. "
+                "Generate them again."
+            ),
+        }
+
+    return {
+        "status": "current",
+        "generation_required": False,
+        "trusted_baseline_required": False,
+        "analysis_version": stored_version,
+        "current_version":
+            CURRENT_PRE_CONNECT_VERSION,
+        "migration_required": False,
+        "stale_sources": [],
+        "message": (
+            "Pre-Connect Safety reports match the current "
+            "Trusted Baseline report."
+        ),
+    }
+
+
 def get_security_advisor_status() -> dict:
     """Check whether saved Security Advisor reports are current."""
 
@@ -2047,6 +2254,9 @@ def read_reports() -> list[dict]:
     trusted_baseline_status = (
         get_trusted_baseline_report_status()
     )
+    pre_connect_status = (
+        get_pre_connect_safety_status()
+    )
 
     advisor_filenames = {
         SECURITY_ADVISOR_TEXT.name,
@@ -2061,6 +2271,11 @@ def read_reports() -> list[dict]:
     trusted_baseline_filenames = {
         TRUSTED_BASELINE_REPORT_CSV.name,
         TRUSTED_BASELINE_REPORT_JSON.name,
+    }
+
+    pre_connect_filenames = {
+        PRE_CONNECT_REPORT_CSV.name,
+        PRE_CONNECT_REPORT_JSON.name,
     }
 
     for report_path in REPORTS_DIRECTORY.iterdir():
@@ -2147,6 +2362,27 @@ def read_reports() -> list[dict]:
                         ],
                     "freshness_message":
                         trusted_baseline_status[
+                            "message"
+                        ],
+                }
+            )
+
+        if (
+            report_path.name
+            in pre_connect_filenames
+        ):
+            report_row.update(
+                {
+                    "freshness_status":
+                        pre_connect_status[
+                            "status"
+                        ],
+                    "generation_required":
+                        pre_connect_status[
+                            "generation_required"
+                        ],
+                    "freshness_message":
+                        pre_connect_status[
                             "message"
                         ],
                 }
