@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import os
 from datetime import datetime
@@ -24,6 +25,8 @@ from typing import Any
 DEFAULT_REPORT_CSV = Path("security_reports/final_security_report.csv")
 DEFAULT_ALERT_LOG = Path("security_reports/alert_notifications.log")
 DEFAULT_ALERT_JSON = Path("security_reports/alert_notifications.json")
+
+CURRENT_ALERT_VERSION = "baseline-aware-v2"
 
 SEVERITY_ORDER = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
 ANSI_COLORS = {
@@ -42,6 +45,73 @@ REQUIRED_COLUMNS = [
     "Attack_Type",
     "Suspicious_Score",
 ]
+
+
+def calculate_source_fingerprint(
+    report_csv: str | Path,
+) -> str | None:
+    """Return SHA-256 for the Threat Analysis source report."""
+
+    path = Path(report_csv)
+
+    try:
+        if (
+            not path.is_file()
+            or path.stat().st_size == 0
+        ):
+            return None
+
+        digest = hashlib.sha256()
+
+        with path.open("rb") as source_file:
+            for chunk in iter(
+                lambda: source_file.read(65536),
+                b"",
+            ):
+                digest.update(chunk)
+
+        return digest.hexdigest()
+
+    except OSError:
+        return None
+
+
+def read_saved_source_fingerprint(
+    json_path: str | Path,
+) -> str | None:
+    """Read the source fingerprint from an existing alert JSON."""
+
+    path = Path(json_path)
+
+    if not path.is_file():
+        return None
+
+    try:
+        payload = json.loads(
+            path.read_text(
+                encoding="utf-8"
+            )
+        )
+    except (
+        OSError,
+        json.JSONDecodeError,
+    ):
+        return None
+
+    if (
+        payload.get("analysis_version")
+        != CURRENT_ALERT_VERSION
+    ):
+        return None
+
+    fingerprint = str(
+        payload.get(
+            "source_report_sha256",
+            "",
+        )
+    ).strip()
+
+    return fingerprint or None
 
 
 def load_security_report(report_csv: str | Path = DEFAULT_REPORT_CSV) -> list[dict[str, str]]:
@@ -120,8 +190,13 @@ def assign_severity(row: dict[str, str], reason: str) -> str:
         return "CRITICAL"
     if attack_type == "ROGUE_AP":
         return "HIGH"
-    if attack_type == "SUSPICIOUS":
+    if attack_type in {
+        "SUSPICIOUS",
+        "WEAK_ENCRYPTION",
+    }:
         return "MEDIUM"
+    if attack_type == "UNKNOWN_NETWORK":
+        return "INFO"
     if risk_level == "LOW RISK" or score <= 60:
         return "LOW"
     return "INFO"
@@ -140,6 +215,10 @@ def generate_recommendation(row: dict[str, str], reason: str) -> str:
         return "Verify device ownership and remove or isolate unauthorized access points."
     if attack_type == "SUSPICIOUS":
         return "Continue monitoring and inspect packet activity for repeated anomalies."
+    if attack_type == "WEAK_ENCRYPTION":
+        return "Avoid sensitive activity until stronger WiFi encryption is enabled or the network is verified."
+    if attack_type == "UNKNOWN_NETWORK":
+        return "Verify the network owner and BSSID before treating this network as trusted."
     if risk_level == "DANGER":
         return "Treat this network as unsafe until manual validation is completed."
     if score <= 60:
@@ -195,17 +274,38 @@ def append_alert_log(alerts: list[dict[str, Any]], log_path: str | Path = DEFAUL
             )
 
 
-def save_json_alerts(alerts: list[dict[str, Any]], json_path: str | Path = DEFAULT_ALERT_JSON) -> None:
-    """Write the latest alert batch and summary to JSON."""
+def save_json_alerts(
+    alerts: list[dict[str, Any]],
+    json_path: str | Path = DEFAULT_ALERT_JSON,
+    source_report_sha256: str | None = None,
+) -> None:
+    """Write the latest alert batch and source metadata to JSON."""
 
     path = Path(json_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
     payload = {
-        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "state": "completed",
+        "analysis_version": CURRENT_ALERT_VERSION,
+        "generated_at": datetime.now().strftime(
+            "%Y-%m-%d %H:%M:%S"
+        ),
+        "source_report_sha256":
+            source_report_sha256,
         "summary": build_alert_summary(alerts),
         "alerts": alerts,
     }
-    path.write_text(json.dumps(payload, indent=4), encoding="utf-8")
+
+    path.write_text(
+        json.dumps(
+            payload,
+            indent=4,
+        ),
+        encoding="utf-8",
+    )
 
 
 def build_alert_summary(alerts: list[dict[str, Any]]) -> dict[str, int]:
@@ -252,27 +352,120 @@ def run_alert_notification(
     log_path: str | Path = DEFAULT_ALERT_LOG,
     json_path: str | Path = DEFAULT_ALERT_JSON,
     use_color: bool | None = None,
-) -> list[dict[str, Any]]:
-    """Perform the complete alert analysis workflow for Module 9."""
+) -> dict[str, Any]:
+    """Perform duplicate-safe alert generation for Module 9."""
 
-    rows = load_security_report(report_csv)
+    source_fingerprint = (
+        calculate_source_fingerprint(
+            report_csv
+        )
+    )
+
+    if source_fingerprint is None:
+        print(
+            "[WARNING] Threat Analysis report is "
+            "missing, empty, or unreadable."
+        )
+
+        return {
+            "ok": False,
+            "state": "report_unavailable",
+            "message": (
+                "Threat Analysis report is missing, "
+                "empty, or unreadable."
+            ),
+            "alerts": [],
+        }
+
+    saved_fingerprint = (
+        read_saved_source_fingerprint(
+            json_path
+        )
+    )
+
+    if (
+        saved_fingerprint
+        == source_fingerprint
+    ):
+        print(
+            "This exact Threat Analysis has already "
+            "been processed. No duplicate alerts "
+            "were written."
+        )
+
+        return {
+            "ok": True,
+            "state": "already_recorded",
+            "message": (
+                "This exact Threat Analysis has "
+                "already been processed. "
+                "No duplicate alerts were written."
+            ),
+            "source_report_sha256":
+                source_fingerprint,
+            "alerts": [],
+        }
+
+    rows = load_security_report(
+        report_csv
+    )
+
     alerts = detect_alerts(rows)
-    color_enabled = _supports_color() if use_color is None else use_color
 
-    if not alerts:
-        print("No active security alerts.")
-        save_json_alerts(alerts, json_path)
-        return alerts
+    color_enabled = (
+        _supports_color()
+        if use_color is None
+        else use_color
+    )
 
-    for alert in alerts:
-        print_alert_banner(alert, use_color=color_enabled)
+    if alerts:
+        for alert in alerts:
+            print_alert_banner(
+                alert,
+                use_color=color_enabled,
+            )
 
-    append_alert_log(alerts, log_path)
-    save_json_alerts(alerts, json_path)
-    print_alert_summary(alerts)
-    print(f"\n[OK] Alert log updated: {Path(log_path)}")
-    print(f"[OK] JSON alerts saved: {Path(json_path)}")
-    return alerts
+        append_alert_log(
+            alerts,
+            log_path,
+        )
+
+        print_alert_summary(alerts)
+
+        print(
+            f"\n[OK] Alert log updated: "
+            f"{Path(log_path)}"
+        )
+
+    else:
+        print(
+            "No active security alerts."
+        )
+
+    save_json_alerts(
+        alerts,
+        json_path,
+        source_report_sha256=
+            source_fingerprint,
+    )
+
+    print(
+        f"[OK] JSON alerts saved: "
+        f"{Path(json_path)}"
+    )
+
+    return {
+        "ok": True,
+        "state": "completed",
+        "message": (
+            "Alert Notification analysis "
+            "completed successfully."
+        ),
+        "source_report_sha256":
+            source_fingerprint,
+        "alert_count": len(alerts),
+        "alerts": alerts,
+    }
 
 
 def _alert_reasons(row: dict[str, str]) -> list[str]:
@@ -287,6 +480,10 @@ def _alert_reasons(row: dict[str, str]) -> list[str]:
         reasons.append("Possible Rogue AP")
     if attack_type == "SUSPICIOUS":
         reasons.append("Suspicious Network Activity")
+    if attack_type == "WEAK_ENCRYPTION":
+        reasons.append("Weak WiFi Encryption")
+    if attack_type == "UNKNOWN_NETWORK":
+        reasons.append("Unverified Network")
     if risk_level == "DANGER":
         reasons.append("Danger Risk Level")
     if score <= 60:
@@ -338,9 +535,23 @@ def _normalize_risk_level(value: str | None) -> str:
 
 
 def _normalize_attack_type(value: str | None) -> str:
-    cleaned = _clean_text(value, "NORMAL").upper().replace("-", "_").replace(" ", "_")
-    if cleaned in {"NORMAL", "SUSPICIOUS", "ROGUE_AP", "EVIL_TWIN"}:
+    cleaned = (
+        _clean_text(value, "NORMAL")
+        .upper()
+        .replace("-", "_")
+        .replace(" ", "_")
+    )
+
+    if cleaned in {
+        "NORMAL",
+        "ROGUE_AP",
+        "EVIL_TWIN",
+        "SUSPICIOUS",
+        "WEAK_ENCRYPTION",
+        "UNKNOWN_NETWORK",
+    }:
         return cleaned
+
     return "NORMAL"
 
 
@@ -373,13 +584,15 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = _parse_args()
-    run_alert_notification(
+
+    result = run_alert_notification(
         report_csv=args.report_csv,
         log_path=args.log_path,
         json_path=args.json_path,
         use_color=not args.no_color,
     )
-    return 0
+
+    return 0 if result.get("ok") else 1
 
 
 if __name__ == "__main__":

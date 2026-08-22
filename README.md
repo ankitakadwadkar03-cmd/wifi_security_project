@@ -285,7 +285,7 @@ Main file:
 evil_twin_detection/evil_twin_detector.py
 ```
 
-Detects possible rogue access points and Evil Twin indicators. It updates the final security report with `Attack_Type`.
+Analyzes wireless findings using the trusted-network baseline and updates the final security report with `Attack_Type`. The current classifications include `NORMAL`, `EVIL_TWIN`, `SUSPICIOUS`, `WEAK_ENCRYPTION`, and `UNKNOWN_NETWORK`. `ROGUE_AP` is retained for explicitly corroborated rogue-access-point findings and is not assigned automatically from an unknown packet-only BSSID.
 
 ### Module 6: Real-Time Security Monitor
 
@@ -344,7 +344,7 @@ Main file:
 alert_notification/alert_notification_system.py
 ```
 
-Generates alert notifications with severity levels.
+Generates severity-based notifications from the current Threat Analysis report. It preserves the final threat classification and prevents duplicate notifications when the same Threat Analysis is processed again.
 
 Output files:
 
@@ -360,7 +360,7 @@ WiFi Scan
 → Packet Capture
 → Security Dashboard
 → Final Report
-→ Rogue AP / Evil Twin Detection
+→ Baseline-Aware Threat Classification
 → Real-Time Monitor
 → Security Advisor
 → Historical Trend Analysis
@@ -369,7 +369,7 @@ WiFi Scan
 
 ## Important Demo Note
 
-Some alerts are marked as possible rogue AP or possible Evil Twin based on suspicious indicators such as unknown BSSIDs, duplicate SSIDs, packet differences, and risk scores. These alerts are investigation indicators, not final proof of an attack.
+NetShield uses a trusted SSID/BSSID baseline together with scan and packet evidence. A trusted SSID appearing with a different BSSID is classified as an `EVIL_TWIN` indicator and still requires manual verification. Suspicious packet behavior is classified as `SUSPICIOUS`, open or WEP networks can be classified as `WEAK_ENCRYPTION`, and secure networks that are simply not present in the trusted baseline are classified as `UNKNOWN_NETWORK` for review. An unknown packet-only BSSID is not automatically treated as a Rogue AP. Automated findings are investigation indicators, not final proof of an attack.
 
 ## Web Dashboard Scanner Control
 
