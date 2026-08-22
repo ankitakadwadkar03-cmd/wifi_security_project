@@ -72,6 +72,11 @@ ALERT_NOTIFICATION_JSON = (
 )
 CURRENT_ALERT_NOTIFICATION_VERSION = "baseline-aware-v2"
 
+LEGACY_ALERT_NOTIFICATION_DIRECTORY = (
+    REPORTS_DIRECTORY
+    / "legacy_alert_notifications"
+)
+
 ALLOWED_REPORT_EXTENSIONS = {".csv", ".json", ".txt", ".log"}
 
 SYSTEMCTL_PATH = "/usr/bin/systemctl"
@@ -1055,6 +1060,8 @@ def get_alert_notification_status() -> dict:
             "current_version":
                 CURRENT_ALERT_NOTIFICATION_VERSION,
             "migration_required": True,
+            "archive_legacy_url":
+                "/api/alerts/archive-legacy",
             "message": (
                 "Saved Alert Notification files were created "
                 "before the current baseline-aware threat logic "
@@ -1128,6 +1135,134 @@ def get_alert_notification_status() -> dict:
             "Threat Analysis."
         ),
     }
+
+
+def archive_legacy_alert_notifications() -> tuple[dict, int]:
+    """Archive legacy Module 9 outputs without deleting evidence."""
+
+    alert_status = get_alert_notification_status()
+
+    if alert_status["status"] != "legacy":
+        return {
+            "ok": False,
+            "state": "archive_not_required",
+            "message": (
+                "Legacy Alert Notification archive is not "
+                "required for status "
+                + str(alert_status["status"])
+                + "."
+            ),
+            "alert_status": alert_status["status"],
+        }, 409
+
+    source_files = [
+        ALERT_NOTIFICATION_LOG,
+        ALERT_NOTIFICATION_JSON,
+    ]
+
+    existing_files = [
+        source
+        for source in source_files
+        if source.exists()
+    ]
+
+    if len(existing_files) != len(source_files):
+        return {
+            "ok": False,
+            "state": "legacy_files_incomplete",
+            "message": (
+                "Legacy Alert Notification files are "
+                "incomplete and cannot be archived as "
+                "one verified pair."
+            ),
+        }, 409
+
+    archive_stamp = datetime.now(
+        timezone.utc
+    ).strftime(
+        "%Y%m%dT%H%M%S%fZ"
+    )
+
+    archive_directory = (
+        LEGACY_ALERT_NOTIFICATION_DIRECTORY
+        / archive_stamp
+    )
+
+    moved_files: list[tuple[Path, Path]] = []
+
+    try:
+        archive_directory.mkdir(
+            parents=True,
+            exist_ok=False,
+        )
+
+        for source in existing_files:
+            destination = (
+                archive_directory
+                / source.name
+            )
+
+            source.replace(destination)
+
+            moved_files.append(
+                (
+                    source,
+                    destination,
+                )
+            )
+
+    except OSError as exc:
+        for source, destination in reversed(
+            moved_files
+        ):
+            if destination.exists():
+                try:
+                    destination.replace(source)
+                except OSError:
+                    pass
+
+        try:
+            archive_directory.rmdir()
+        except OSError:
+            pass
+
+        return {
+            "ok": False,
+            "state": "archive_failed",
+            "message": (
+                "Legacy Alert Notification files could "
+                "not be archived: "
+                + str(exc)
+            ),
+        }, 500
+
+    try:
+        archive_display = str(
+            archive_directory.relative_to(
+                PROJECT_ROOT
+            )
+        )
+    except ValueError:
+        archive_display = str(
+            archive_directory
+        )
+
+    return {
+        "ok": True,
+        "state": "archived",
+        "message": (
+            "Legacy Alert Notification files were "
+            "archived successfully. NetShield can now "
+            "generate baseline-aware Module 9 alerts."
+        ),
+        "archive_directory": archive_display,
+        "archived_files": [
+            destination.name
+            for _, destination in moved_files
+        ],
+        "after_status":
+            get_alert_notification_status()["status"],
+    }, 200
 
 
 def _format_file_size(size_bytes: int) -> str:
@@ -4264,6 +4399,14 @@ def generate_security_advisor():
 @app.post("/api/threats/analyze")
 def analyze_threats():
     response, status_code = run_threat_analysis()
+    return jsonify(response), status_code
+
+
+@app.post("/api/alerts/archive-legacy")
+def archive_legacy_alert_notifications_route():
+    response, status_code = (
+        archive_legacy_alert_notifications()
+    )
     return jsonify(response), status_code
 
 
