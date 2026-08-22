@@ -120,8 +120,13 @@ def assign_severity(row: dict[str, str], reason: str) -> str:
         return "CRITICAL"
     if attack_type == "ROGUE_AP":
         return "HIGH"
-    if attack_type == "SUSPICIOUS":
+    if attack_type in {
+        "SUSPICIOUS",
+        "WEAK_ENCRYPTION",
+    }:
         return "MEDIUM"
+    if attack_type == "UNKNOWN_NETWORK":
+        return "INFO"
     if risk_level == "LOW RISK" or score <= 60:
         return "LOW"
     return "INFO"
@@ -140,6 +145,10 @@ def generate_recommendation(row: dict[str, str], reason: str) -> str:
         return "Verify device ownership and remove or isolate unauthorized access points."
     if attack_type == "SUSPICIOUS":
         return "Continue monitoring and inspect packet activity for repeated anomalies."
+    if attack_type == "WEAK_ENCRYPTION":
+        return "Avoid sensitive activity until stronger WiFi encryption is enabled or the network is verified."
+    if attack_type == "UNKNOWN_NETWORK":
+        return "Verify the network owner and BSSID before treating this network as trusted."
     if risk_level == "DANGER":
         return "Treat this network as unsafe until manual validation is completed."
     if score <= 60:
@@ -287,6 +296,10 @@ def _alert_reasons(row: dict[str, str]) -> list[str]:
         reasons.append("Possible Rogue AP")
     if attack_type == "SUSPICIOUS":
         reasons.append("Suspicious Network Activity")
+    if attack_type == "WEAK_ENCRYPTION":
+        reasons.append("Weak WiFi Encryption")
+    if attack_type == "UNKNOWN_NETWORK":
+        reasons.append("Unverified Network")
     if risk_level == "DANGER":
         reasons.append("Danger Risk Level")
     if score <= 60:
@@ -338,9 +351,23 @@ def _normalize_risk_level(value: str | None) -> str:
 
 
 def _normalize_attack_type(value: str | None) -> str:
-    cleaned = _clean_text(value, "NORMAL").upper().replace("-", "_").replace(" ", "_")
-    if cleaned in {"NORMAL", "SUSPICIOUS", "ROGUE_AP", "EVIL_TWIN"}:
+    cleaned = (
+        _clean_text(value, "NORMAL")
+        .upper()
+        .replace("-", "_")
+        .replace(" ", "_")
+    )
+
+    if cleaned in {
+        "NORMAL",
+        "ROGUE_AP",
+        "EVIL_TWIN",
+        "SUSPICIOUS",
+        "WEAK_ENCRYPTION",
+        "UNKNOWN_NETWORK",
+    }:
         return cleaned
+
     return "NORMAL"
 
 
